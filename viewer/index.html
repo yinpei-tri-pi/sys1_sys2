@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sys1_sys2 results</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface-1: #fcfcfb; --surface-2: #f3f2ee;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --series-1-track: #cde2fb; --series-1-strong: #184f95;
+  --good: #0ca30c; --good-text: #006300; --warning: #fab219; --critical: #d03b3b;
+  --select: rgba(42,120,214,0.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19; --surface-2: #232321;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-1-track: #0d366b; --series-1-strong: #86b6ef;
+    --good-text: #0ca30c; --select: rgba(57,135,229,0.16);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.viz-root { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text-primary);
+  background: var(--page); min-height: 100vh; display: grid; grid-template-columns: 300px 1fr; }
+aside { border-right: 1px solid var(--border); background: var(--surface-1); height: 100vh; overflow-y: auto;
+  position: sticky; top: 0; }
+main { padding: 20px 28px 60px; min-width: 0; }
+h1 { font-size: 15px; margin: 0; } h2 { font-size: 13px; margin: 0 0 8px; color: var(--text-secondary);
+  text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.head { padding: 14px 16px 10px; border-bottom: 1px solid var(--border); }
+.head .path { color: var(--text-muted); font-size: 12px; word-break: break-all; margin-top: 2px; }
+.head button { margin-top: 8px; }
+.group { padding: 10px 16px 4px; font-size: 12px; color: var(--text-secondary); font-weight: 600;
+  display: flex; justify-content: space-between; }
+.task { padding: 6px 16px 8px; }
+.task-row { display: flex; justify-content: space-between; gap: 8px; font-weight: 500; }
+.rate { font-variant-numeric: tabular-nums; color: var(--text-secondary); white-space: nowrap; }
+.meter { height: 6px; border-radius: 4px; background: var(--series-1-track); margin: 4px 0 6px; overflow: hidden; }
+.meter > i { display: block; height: 100%; background: var(--series-1); border-radius: 4px; }
+.trials { display: flex; flex-wrap: wrap; gap: 4px; }
+.trial { font: inherit; font-size: 12px; padding: 1px 7px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); }
+.trial[aria-current="true"] { outline: 2px solid var(--series-1); outline-offset: 1px; }
+.ok { color: var(--good-text); } .bad { color: var(--critical); }
+.icon-ok::before { content: "✓"; color: var(--good); font-weight: 700; margin-right: 3px; }
+.icon-bad::before { content: "✗"; color: var(--critical); font-weight: 700; margin-right: 3px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface-2); font-size: 12px; font-weight: 600; }
+.pill.rule::before { content: "▲"; color: var(--warning); font-size: 10px; }
+button, select { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px;
+  margin-bottom: 14px; }
+.title { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text-secondary); align-items: center; }
+.timeline { position: relative; display: flex; gap: 2px; height: 22px; margin: 14px 0 4px;
+  background: var(--series-1-track); border-radius: 4px; }
+.seg { height: 100%; background: var(--series-1); cursor: pointer; border: 0; padding: 0; position: relative; }
+.seg:first-child { border-radius: 4px 0 0 4px; }
+.seg.last { border-radius: 0 4px 4px 0; }
+.seg.cur { background: var(--series-1-strong); }
+.seg.has-rule::after { content: "▲"; position: absolute; top: -13px; left: 50%; transform: translateX(-50%);
+  color: var(--warning); font-size: 9px; }
+.playhead { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text-primary);
+  pointer-events: none; }
+.axis { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; }
+#tip { position: fixed; pointer-events: none; z-index: 9; max-width: 340px; background: var(--surface-1);
+  color: var(--text-primary); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
+  font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); display: none; }
+.player { display: grid; gap: 8px; }
+.caption { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; }
+.caption .sg { font-weight: 600; font-size: 15px; }
+.caption .sub { color: var(--text-secondary); font-size: 12px; }
+video, .media img { width: 100%; display: block; border-radius: 6px; background: #000; }
+.controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.controls .stepnum { margin-left: auto; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+pre { white-space: pre-wrap; margin: 6px 0 0; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface-2); border-radius: 6px; padding: 8px 10px; }
+.plan-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 14px; }
+.turn { scroll-margin-top: 12px; }
+.turn.cur { border-color: var(--series-1); box-shadow: 0 0 0 1px var(--series-1); }
+.turn-head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-bottom: 10px; }
+.turn-head .n { font-weight: 700; } .turn-head .s { color: var(--text-secondary); }
+.turn-head button { margin-left: auto; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr); gap: 14px; }
+.col h3 { font-size: 12px; margin: 0 0 6px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+.thought { color: var(--text-secondary); font-style: italic; }
+.subgoal { font-weight: 600; margin: 6px 0 2px; }
+.detail { color: var(--text-secondary); font-size: 13px; }
+.kv { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
+.iv { border-left: 3px solid var(--warning); padding: 4px 8px; margin-top: 6px; background: var(--surface-2);
+  border-radius: 0 6px 6px 0; font-size: 12px; }
+.iv b { font-weight: 600; }
+details summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
+.muted { color: var(--text-muted); }
+.empty { color: var(--text-muted); padding: 40px 0; }
+@media (max-width: 1100px) { .cols, .plan-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <aside>
+    <div class="head">
+      <h1>sys1_sys2 · RoboCasa results</h1>
+      <div class="path" id="logdir"></div>
+      <button id="reload" title="re-read the results dir (for a run in progress)">Reload</button>
+    </div>
+    <nav id="tasks" aria-label="tasks"></nav>
+  </aside>
+  <main id="main"><div class="empty">Pick an episode on the left.</div></main>
+</div>
+<div id="tip" role="tooltip"></div>
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const file = rel => "/files/" + rel.split("/").map(encodeURIComponent).join("/");
+const pct = (k, n) => n ? Math.round(100 * k / n) : 0;
+const GROUP_NAME = {atomic_seen: "Atomic-Seen", composite_seen: "Composite-Seen", composite_unseen: "Composite-Unseen", other: "Other"};
+let EP = null, cur = 0, speed = 1;
+
+async function loadSummary() {
+  const s = await (await fetch("/api/summary")).json();
+  $("#logdir").textContent = s.log_dir;
+  const groups = {};
+  for (const t of s.tasks) (groups[t.group] ||= []).push(t);
+  let html = "";
+  for (const g of Object.keys(groups)) {
+    const ts = groups[g];
+    const avg = ts.reduce((a, t) => a + pct(t.n_success, t.n), 0) / ts.length;
+    const size = s.group_size[g];
+    html += `<div class="group"><span>${esc(GROUP_NAME[g] || g)}</span><span class="rate">${avg.toFixed(1)}% · ${ts.length}${size ? "/" + size : ""} tasks</span></div>`;
+    for (const t of ts) {
+      const p = pct(t.n_success, t.n);
+      html += `<div class="task"><div class="task-row"><span>${esc(t.task)}</span><span class="rate">${t.n_success}/${t.n} · ${p}%</span></div>
+        <div class="meter" role="meter" aria-valuenow="${p}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(t.task)} success rate"><i style="width:${p}%"></i></div>
+        <div class="trials">${t.episodes.map(e => `<button class="trial ${e.success ? "icon-ok" : "icon-bad"}" data-key="${esc(e.key)}"
+          aria-label="trial ${e.trial} ${e.success ? "success" : "failure"}" title="${esc(e.termination || "")} · ${e.steps}/${e.horizon} steps · ${e.turns} turns${e.rules ? " · " + e.rules + " language-steering interventions" : ""}">#${e.trial} ${e.steps ?? ""}</button>`).join("")}</div></div>`;
+    }
+  }
+  $("#tasks").innerHTML = html || `<div class="empty" style="padding:16px">No episodes yet.</div>`;
+  markCurrentTrial();
+}
+
+function markCurrentTrial() {
+  for (const b of document.querySelectorAll(".trial")) b.setAttribute("aria-current", EP && b.dataset.key === EP.key ? "true" : "false");
+}
+
+async function openEpisode(key) {
+  const r = await fetch("/api/episode?key=" + encodeURIComponent(key));
+  if (!r.ok) { $("#main").innerHTML = `<div class="empty">Episode not found: ${esc(key)}</div>`; return; }
+  EP = await r.json();
+  history.replaceState(null, "", "#ep=" + encodeURIComponent(key));
+  markCurrentTrial();
+  renderEpisode();
+}
+
+function ivHtml(iv) {
+  const ba = iv.before !== undefined ? `<div class="muted">${esc(iv.before)} → <b>${esc(iv.after)}</b></div>` : "";
+  return `<div class="iv"><b>${esc(iv.rule)}</b> <span class="muted">[${esc(iv.kind)}]</span><div>${esc(iv.detail || "")}</div>${ba}</div>`;
+}
+
+function renderEpisode() {
+  const e = EP, horizon = e.horizon || e.steps || 1;
+  const playable = e.turns.filter(t => t.s1_video);
+  const status = e.success ? `<span class="pill icon-ok ok">Success</span>` : `<span class="pill icon-bad bad">Failure</span>`;
+  const segs = e.turns.filter(t => t.s1_steps).map((t, i, a) => `<button class="seg${i === a.length - 1 ? " last" : ""}${t.interventions.length ? " has-rule" : ""}"
+      style="width:${100 * t.s1_steps / horizon}%" data-turn="${t.turn}"
+      aria-label="turn ${t.turn}: ${esc(t.subgoal)}, steps ${t.step_start} to ${t.step_start + t.s1_steps}"></button>`).join("");
+  $("#main").innerHTML = `
+    <div class="card">
+      <div class="title">${esc(e.instruction)}</div>
+      <div class="meta">${status}<span>${esc(e.task)} · trial ${esc(e.trial)}</span>
+        <span>${esc(e.termination)}</span><span class="rate">${e.steps} / ${horizon} env steps</span>
+        <span>${e.n_turns} System2 turns</span>${e.n_rule_interventions ? `<span class="pill rule">${e.n_rule_interventions} language-steering interventions</span>` : ""}
+        <span class="muted">${e.seconds ?? "?"} s wall</span></div>
+      ${e.error ? `<pre class="bad">${esc(e.error)}</pre>` : ""}
+      <div class="timeline" id="timeline">${segs}<div class="playhead" id="playhead" style="left:0"></div></div>
+      <div class="axis"><span>0</span><span>step budget (official horizon) ${horizon}</span></div>
+    </div>
+    <div class="card player">
+      <div class="caption" id="caption"></div>
+      ${playable.length ? `<video id="video" muted playsinline preload="auto"></video>` : `<div class="empty">No System1 video in this episode.</div>`}
+      <div class="controls">
+        <button id="prev" aria-label="previous turn">⏮ Prev turn</button>
+        <button id="play">▶ Play episode</button>
+        <button id="next" aria-label="next turn">Next turn ⏭</button>
+        <label>speed <select id="speed">${[0.5, 1, 2, 4].map(v => `<option value="${v}"${v === speed ? " selected" : ""}>${v}×</option>`).join("")}</select></label>
+        <span class="stepnum" id="stepnum"></span>
+      </div>
+      <div class="muted" style="font-size:12px">Views: left shoulder · right shoulder · wrist. Keys: space play/pause, ←/→ turn.</div>
+    </div>
+    <div class="card">
+      <h2>System2 plan (cold, from the first frame)</h2>
+      <div class="plan-grid">
+        <div>${e.plan.scene ? `<div class="media"><img src="${file(e.plan.scene)}" alt="first frame System2 planned from"></div>` : ""}
+          <p class="thought">${esc(e.plan.thought)}</p></div>
+        <div><pre>${esc(e.plan.plan)}</pre>${e.final_plan ? `<details><summary>final checklist</summary><pre>${esc(e.final_plan)}</pre></details>` : ""}</div>
+      </div>
+    </div>
+    <h2 style="margin:20px 0 10px">Turns: System2 decision → System1 segment</h2>
+    ${e.turns.map(turnHtml).join("")}
+    <div class="muted" style="font-size:12px">${esc(e.reset_mode || "")} · language steering: ${esc(e.rule_tier || "")}</div>`;
+  bindEpisode();
+  const first = e.turns.findIndex(t => t.s1_video);
+  setTurn(first < 0 ? 0 : first, false);
+}
+
+function turnHtml(t, i) {
+  const held = t.held_by_rule ? `<div class="iv"><b>System2 not queried</b>: turn held by language steering <b>${esc(t.held_by_rule)}</b> (replays a cached subgoal)</div>` : "";
+  const s2in = t.s2_input_video ? `<video src="${file(t.s2_input_video)}" muted loop playsinline controls preload="metadata"></video><div class="kv">clip of the previous segment (4 fps)</div>`
+    : t.s2_input_image ? `<div class="media"><img src="${file(t.s2_input_image)}" alt="scene System2 saw"></div><div class="kv">current scene</div>` : `<div class="muted">—</div>`;
+  const priv = t.privileged || {};
+  const changed = t.s2_subgoal && t.s2_subgoal !== t.subgoal ? `<div class="kv">System2 proposed “${esc(t.s2_subgoal)}”; language steering replaced it</div>` : "";
+  return `<div class="card turn" id="turn-${i}">
+    <div class="turn-head"><span class="n">Turn ${t.turn}</span>
+      <span class="s rate">steps ${t.step_start}–${t.step_start + t.s1_steps} (${t.s1_steps})</span>
+      ${t.judge ? `<span class="pill">${esc(t.judge)}</span>` : ""}
+      ${t.interventions.length ? `<span class="pill rule">${t.interventions.length} steering</span>` : ""}
+      ${t.s1_video ? `<button data-seek="${i}">▶ play from here</button>` : ""}</div>
+    <div class="cols">
+      <div class="col"><h3>System2 saw</h3>${s2in}</div>
+      <div class="col"><h3>System2 output</h3>${held}
+        ${t.thought ? `<div class="thought">${esc(t.thought)}</div>` : ""}
+        <div class="subgoal">→ ${esc(t.subgoal || "—")}</div>
+        ${t.subgoal_detail ? `<div class="detail">${esc(t.subgoal_detail)}</div>` : ""}${changed}
+        <div class="kv">estimated ${esc(t.estimated_step ?? "—")} steps · task status shown: ${esc(priv.task_status ?? "—")} · gripper: ${esc(priv.gripper_status ?? "—")}${t.latency_s ? ` · ${t.latency_s}s` : ""}</div>
+        ${t.interventions.map(ivHtml).join("")}
+        ${t.plan_update ? `<details><summary>plan update</summary><pre>${esc(t.plan_update)}</pre></details>` : ""}
+        ${t.response_raw ? `<details><summary>raw response</summary><pre>${esc(t.response_raw)}</pre></details>` : ""}</div>
+      <div class="col"><h3>System1 executed</h3>
+        ${t.s1_video ? `<video src="${file(t.s1_video)}"${t.anchor ? ` poster="${file(t.anchor)}"` : ""} muted playsinline controls preload="metadata"></video>` : `<div class="muted">no env steps this turn</div>`}
+        <div class="kv">${t.s1_steps} steps of budget ${esc(t.s1_budget ?? "—")} · stop: ${esc(t.s1_stop ?? "—")}${t.success_step != null ? ` · <span class="ok icon-ok">env success at step ${t.step_start + t.success_step + 1}</span>` : ""}</div>
+        ${t.s1_prompt ? `<details><summary>System1 prompt</summary><pre>${esc(t.s1_prompt)}</pre></details>` : ""}</div>
+    </div></div>`;
+}
+
+function setTurn(i, autoplay) {
+  const t = EP.turns[i]; if (!t) return;
+  cur = i;
+  document.querySelectorAll(".turn").forEach((el, k) => el.classList.toggle("cur", k === i));
+  document.querySelectorAll(".seg").forEach(s => s.classList.toggle("cur", +s.dataset.turn === t.turn));
+  $("#caption").innerHTML = `<div class="sub">Turn ${t.turn} of ${EP.turns.length} · System2 → System1</div>
+    <div class="sg">${esc(t.subgoal || "—")}</div>
+    <div class="sub">judge (previous segment): ${esc(t.judge || "—")} · estimated ${esc(t.estimated_step ?? "—")} steps · System1 ran ${t.s1_steps} · stop: ${esc(t.s1_stop || "—")}${t.interventions.length ? ` · ▲ steering: ${esc(t.interventions.map(v => v.rule).join(", "))}` : ""}</div>`;
+  const v = $("#video");
+  if (v && t.s1_video) {
+    v.poster = t.anchor ? file(t.anchor) : "";  // the segment's first frame, until it plays
+    v.src = file(t.s1_video);
+    v.playbackRate = speed;
+    if (autoplay) v.play();
+  }
+  updateClock();
+}
+
+function updateClock() {
+  const t = EP.turns[cur], v = $("#video"), horizon = EP.horizon || EP.steps || 1;
+  const step = t.step_start + Math.min(t.s1_steps, Math.floor((v && v.currentTime || 0) * EP.sim_fps));
+  $("#playhead").style.left = (100 * step / horizon) + "%";
+  $("#stepnum").textContent = `step ${step} / ${horizon}`;
+}
+
+function nextPlayable(from, dir) {
+  for (let i = from + dir; i >= 0 && i < EP.turns.length; i += dir) if (EP.turns[i].s1_video) return i;
+  return -1;
+}
+
+function bindEpisode() {
+  const v = $("#video");
+  if (v) {
+    v.addEventListener("timeupdate", updateClock);
+    v.addEventListener("loadedmetadata", () => { v.playbackRate = speed; });
+    v.addEventListener("ended", () => { const n = nextPlayable(cur, 1); if (n >= 0) setTurn(n, true); else $("#play").textContent = "▶ Play episode"; });
+    v.addEventListener("play", () => { $("#play").textContent = "⏸ Pause"; });
+    v.addEventListener("pause", () => { if (!v.ended) $("#play").textContent = "▶ Play episode"; });
+  }
+  $("#play").onclick = () => { if (!v) return; v.paused ? v.play() : v.pause(); };
+  $("#prev").onclick = () => { const n = nextPlayable(cur, -1); if (n >= 0) setTurn(n, v && !v.paused); };
+  $("#next").onclick = () => { const n = nextPlayable(cur, 1); if (n >= 0) setTurn(n, v && !v.paused); };
+  $("#speed").onchange = ev => { speed = +ev.target.value; if (v) v.playbackRate = speed; };
+  document.querySelectorAll("[data-seek]").forEach(b => b.onclick = () => { setTurn(+b.dataset.seek, true); window.scrollTo({top: 0, behavior: "smooth"}); });
+  const tip = $("#tip");
+  document.querySelectorAll(".seg").forEach(s => {
+    const i = EP.turns.findIndex(t => t.turn === +s.dataset.turn), t = EP.turns[i];
+    const show = (x, y) => {
+      tip.innerHTML = `<b>Turn ${t.turn}</b> · steps ${t.step_start}–${t.step_start + t.s1_steps}<br>${esc(t.subgoal)}<br><span style="color:var(--text-secondary)">judge: ${esc(t.judge || "—")} · stop: ${esc(t.s1_stop || "—")}${t.interventions.length ? `<br>▲ ${esc(t.interventions.map(v => v.rule).join(", "))}` : ""}</span>`;
+      tip.style.display = "block"; tip.style.left = Math.min(x + 12, innerWidth - 360) + "px"; tip.style.top = (y + 14) + "px";
+    };
+    s.onmousemove = ev => show(ev.clientX, ev.clientY);
+    s.onfocus = () => { const r = s.getBoundingClientRect(); show(r.left, r.bottom); };
+    s.onmouseleave = s.onblur = () => { tip.style.display = "none"; };
+    s.onclick = () => setTurn(i, v && !v.paused);
+  });
+}
+
+document.addEventListener("keydown", ev => {
+  if (!EP || ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+  if (ev.key === " ") { ev.preventDefault(); $("#play").click(); }
+  if (ev.key === "ArrowRight") $("#next").click();
+  if (ev.key === "ArrowLeft") $("#prev").click();
+});
+$("#tasks").addEventListener("click", ev => { const b = ev.target.closest(".trial"); if (b) openEpisode(b.dataset.key); });
+$("#reload").onclick = async () => { await loadSummary(); if (EP) openEpisode(EP.key); };
+
+loadSummary().then(() => {
+  const m = location.hash.match(/ep=([^&]+)/);
+  const key = m ? decodeURIComponent(m[1]) : $(".trial")?.dataset.key;
+  if (key) openEpisode(key);
+});
+</script>
+</body>
+</html>
