@@ -36,6 +36,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import time
 
@@ -53,6 +54,7 @@ from robocasa.utils.dataset_registry import TARGET_TASKS  # noqa: E402
 from robocasa.utils.dataset_registry_utils import get_task_horizon  # noqa: E402
 
 import combined_eval as CE  # noqa: E402
+import work_queue as WQ  # noqa: E402
 import sys2_client as S2C  # noqa: E402
 
 GYM_CAMERA_SIZE = 256  # RoboCasaGymEnv's camera config (PandaOmronKeyConverter.get_camera_config)
@@ -147,6 +149,15 @@ def build_argparser():
     off.add_argument("--num-trials", type=int, default=50, help="rollouts per task (leaderboard: 50)")
     off.add_argument("--log-dir", type=Path, required=True,
                      help="results root: evals/<split>/<task>/<timestamp>/stats.json + episodes/")
+    off.add_argument("--task-queue", action="store_true",
+                     help="pull tasks from a shared queue in <log-dir>/claims/ (longest horizon first) "
+                          "instead of a fixed list: every stack of a multi-GPU run uses the same flags, "
+                          "and the global seed is reset before each task so results do not depend on "
+                          "which stack ran which task")
+    off.add_argument("--worker-name", default=None, help="name recorded in queue claims")
+    off.add_argument("--shard", default=None, metavar="K/N",
+                     help="run only tasks K, K+N, K+2N, ... of the expanded task list: one stack of a "
+                          "multi-GPU run (scripts/run_fleet.sh); all stacks share one --log-dir")
     return ap
 
 
@@ -159,17 +170,26 @@ def main() -> None:
         raise SystemExit("--max-official-steps/--task-limits-json would replace the official horizon")
     if args.goal_json:
         raise SystemExit("--goal-json would replace the environment's task instruction")
-    # Same tier resolution as combined_eval.run_sweep (task rules imply general rules).
-    args.general_rules = bool(args.general_rules or args.task_rules)
+    # Same tier resolution as combined_eval.run_sweep (task steers imply general steers).
+    args.general_lang_steer = bool(args.general_lang_steer or args.task_lang_steer)
     if args.last_milestone_retry is None:
-        args.last_milestone_retry = args.general_rules
+        args.last_milestone_retry = args.general_lang_steer
 
     tasks = _expand_tasks(args.tasks)
+    if args.shard:
+        try:
+            k, n = (int(x) for x in args.shard.split("/"))
+            if not 0 <= k < n:
+                raise ValueError
+        except ValueError:
+            raise SystemExit(f"--shard must be K/N with 0 <= K < N, got {args.shard!r}") from None
+        tasks = tasks[k::n]
+    print(f"tasks ({len(tasks)}{' shard ' + args.shard if args.shard else ''}): {' '.join(tasks)}", flush=True)
     log_dir = args.log_dir.resolve()
     out_root = log_dir / "episodes"
     if not args.method:
         args.method = CE._short_method_name(args.s1_dir, args.s2_dir)
-    CE._write_run_rule_config(out_root, args.method, args)
+    CE._write_run_lang_steer_config(out_root, args.method, args)
     norm_stats = None
     if args.norm_stats and args.norm_stats.exists():
         raw = json.loads(args.norm_stats.read_text())
@@ -182,61 +202,82 @@ def main() -> None:
 
     np.random.seed(args.seed)
     summary = {}
+    claims = None
+    if args.task_queue:
+        if args.shard:
+            raise SystemExit("--task-queue and --shard are alternatives")
+        claims = WQ.Claims(log_dir / "claims", args.worker_name or f"{socket.gethostname()}-{os.getpid()}")
+        tasks = sorted(tasks, key=get_task_horizon, reverse=True)   # longest first: best load balance
     for task in tasks:
         task_dir = log_dir / "evals" / args.split / task
         if _task_done(task_dir):
             print(f"{task}/{args.split}: stats.json exists, skipping.", flush=True)
             continue
-        horizon = get_task_horizon(task)
-        print(f"\n##### {task}  split={args.split} seed={args.seed} trials={args.num_trials} "
-              f"horizon={horizon}", flush=True)
-        t_task = time.time()
-        gym_env = gym.make(f"robocasa/{task}", split=args.split, seed=args.seed)
-        adapter = OfficialResetAdapter(gym_env, task, args.split, args.seed)
-        adapter.install()
-        results = []
+        if claims is not None:
+            if not claims.take(task):
+                continue          # another stack is running it
+            if _task_done(task_dir):   # finished between the check and the claim
+                claims.release(task)
+                continue
+            np.random.seed(args.seed)
         try:
-            for trial in range(args.num_trials):
-                print(f"=== {task} trial {trial + 1}/{args.num_trials} ===", flush=True)
-                args.episode_index = trial
-                doc = CE.eval_episode(Path(f"official/{task}"), s1, s2, args, out_root, args.method,
-                                      norm_stats)
-                if doc.get("error"):
-                    # An infrastructure failure (server down, crash) is not a policy failure; abort
-                    # the task rather than score it, so a rerun starts the task from trial 0.
-                    raise RuntimeError(f"{task} trial {trial}: {doc['error']}")
-                if doc.get("max_official_steps") != horizon:
-                    raise RuntimeError(f"{task}: loop horizon {doc.get('max_official_steps')} != "
-                                       f"official horizon {horizon}")
-                doc["lerobot_dir"] = None
-                doc["config"]["reset_mode"] = (f'official: gym.make("robocasa/{task}", split='
-                                               f'"{args.split}", seed={args.seed}) then env.reset() '
-                                               f"for trial {trial}")
-                doc["official_protocol"] = {"split": args.split, "seed": args.seed, "trial": trial,
-                                            "horizon": horizon, "num_trials": args.num_trials}
-                CE._write_json(out_root / args.method / doc["episode_id"].replace("/", "__")
-                               / "episode.json", doc)
-                results.append(doc)
-                n_ok = sum(bool(r.get("episode_success")) for r in results)
-                print(f"  success={bool(doc.get('episode_success'))} termination={doc.get('termination')} "
-                      f"steps={doc.get('n_env_steps')}  [{task}: {n_ok}/{len(results)}]", flush=True)
+            summary[task] = _run_task(task, task_dir, args, out_root, s1, s2, norm_stats)
         finally:
-            gym_env.close()
-
-        n_ok = sum(bool(r.get("episode_success")) for r in results)
-        stats = {"num_episodes": len(results), "success_rate": n_ok / len(results)}
-        stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M")
-        CE._write_json(task_dir / stamp / "stats.json", stats)
-        CE._write_json(task_dir / stamp / "episodes.json", {
-            "method": args.method, "split": args.split, "seed": args.seed, "horizon": horizon,
-            "seconds": round(time.time() - t_task, 1),
-            "episodes": [{k: r.get(k) for k in ("episode_id", "episode_success", "termination",
-                                                "n_env_steps", "n_turns", "seconds")}
-                         for r in results],
-        })
-        summary[task] = stats["success_rate"]
-        print(f"[{task}] success rate {stats['success_rate']:.3f} ({n_ok}/{len(results)})", flush=True)
+            if claims is not None:
+                claims.release(task)
     print("\nSUMMARY", json.dumps(summary, indent=1), flush=True)
+
+
+def _run_task(task, task_dir, args, out_root, s1, s2, norm_stats) -> float:
+    horizon = get_task_horizon(task)
+    print(f"\n##### {task}  split={args.split} seed={args.seed} trials={args.num_trials} "
+          f"horizon={horizon}", flush=True)
+    t_task = time.time()
+    gym_env = gym.make(f"robocasa/{task}", split=args.split, seed=args.seed)
+    adapter = OfficialResetAdapter(gym_env, task, args.split, args.seed)
+    adapter.install()
+    results = []
+    try:
+        for trial in range(args.num_trials):
+            print(f"=== {task} trial {trial + 1}/{args.num_trials} ===", flush=True)
+            args.episode_index = trial
+            doc = CE.eval_episode(Path(f"official/{task}"), s1, s2, args, out_root, args.method,
+                                  norm_stats)
+            if doc.get("error"):
+                # An infrastructure failure (server down, crash) is not a policy failure; abort
+                # the task rather than score it, so a rerun starts the task from trial 0.
+                raise RuntimeError(f"{task} trial {trial}: {doc['error']}")
+            if doc.get("max_official_steps") != horizon:
+                raise RuntimeError(f"{task}: loop horizon {doc.get('max_official_steps')} != "
+                                   f"official horizon {horizon}")
+            doc["lerobot_dir"] = None
+            doc["config"]["reset_mode"] = (f'official: gym.make("robocasa/{task}", split='
+                                           f'"{args.split}", seed={args.seed}) then env.reset() '
+                                           f"for trial {trial}")
+            doc["official_protocol"] = {"split": args.split, "seed": args.seed, "trial": trial,
+                                        "horizon": horizon, "num_trials": args.num_trials}
+            CE._write_json(out_root / args.method / doc["episode_id"].replace("/", "__")
+                           / "episode.json", doc)
+            results.append(doc)
+            n_ok = sum(bool(r.get("episode_success")) for r in results)
+            print(f"  success={bool(doc.get('episode_success'))} termination={doc.get('termination')} "
+                  f"steps={doc.get('n_env_steps')}  [{task}: {n_ok}/{len(results)}]", flush=True)
+    finally:
+        gym_env.close()
+
+    n_ok = sum(bool(r.get("episode_success")) for r in results)
+    stats = {"num_episodes": len(results), "success_rate": n_ok / len(results)}
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M")
+    CE._write_json(task_dir / stamp / "stats.json", stats)
+    CE._write_json(task_dir / stamp / "episodes.json", {
+        "method": args.method, "split": args.split, "seed": args.seed, "horizon": horizon,
+        "seconds": round(time.time() - t_task, 1),
+        "episodes": [{k: r.get(k) for k in ("episode_id", "episode_success", "termination",
+                                            "n_env_steps", "n_turns", "seconds")}
+                     for r in results],
+    })
+    print(f"[{task}] success rate {stats['success_rate']:.3f} ({n_ok}/{len(results)})", flush=True)
+    return stats["success_rate"]
 
 
 if __name__ == "__main__":

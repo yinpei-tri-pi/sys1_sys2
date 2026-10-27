@@ -20,7 +20,9 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[[ -n "$CKPT" ]] || { echo "FATAL: --ckpt is required" >&2; exit 2; }
+source "$ROOT/scripts/checkpoints.env"
+CKPT=${CKPT:-$ROOT/$S1_CKPT_DEFAULT}   # default: the downloaded checkpoint
+[[ -d "$CKPT" ]] || { echo "FATAL: no checkpoint at $CKPT (pass --ckpt or run scripts/download_checkpoints.sh)" >&2; exit 2; }
 CKPT=$(cd "$CKPT" && pwd)
 [[ -d "$CKPT/params" ]] || { echo "FATAL: $CKPT has no params/ (pass the step dir, e.g. .../269999)" >&2; exit 1; }
 PY="$ROOT/system1/.venv/bin/python"

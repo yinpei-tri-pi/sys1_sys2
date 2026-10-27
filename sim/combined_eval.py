@@ -9,7 +9,7 @@ decides HOW to move. One loop:
       +-> S1 SEGMENT  prompt = "Task: <goal>; Current Subgoal: <S2 subgoal>"
       |               anchor = FIRST frame of THIS segment; executed_step starts at 0
       |               budget = estimated_step * horizon_mult (capped); ends on the shared
-      |               STOP RULE (progress >= thresh AND action quiescence) or budget
+      |               STOP CRITERION (progress >= thresh AND action quiescence) or budget
       |
     EXEC turn n   checklist + CLIP of the segment just run + privileged env signals
                   -> next <subgoal>, or <judge>task_finish  => STOP
@@ -47,21 +47,16 @@ needs comes from the raw LeRobot dataset and the env itself:
                                          "Current task status" line System2 reads.
 The recorded ACTIONS are never used; System1 generates every action.
 
-Run (robocasa micromamba env; needs a System2 vLLM server AND a System1 policy server):
-    MUJOCO_GL=egl "$ROBOCASA_PY" examples/robocasa/combined_eval.py \
+In this repo the loop is driven by sim/official_eval.py (leaderboard protocol: fresh gym resets)
+and sim/target_eval.py (the 30-episodes-per-task target-split dataset protocol); see the README.
+Run directly on one dataset episode (needs a System2 vLLM server AND a System1 policy server):
+    MUJOCO_GL=egl sim/.venv/bin/python sim/combined_eval.py \
         --lerobot-dir "$ROBOCASA_LEROBOT_ROOT/v1.0/target/atomic/CloseFridge/20250816/lerobot" \
-        --episodes 0 --method s2s1_progreg \
-        --s1-port 8060 --s2-port 8100 \
-        --norm-stats <ckpt>/assets/robocasa_system1/norm_stats.json \
-        --out-root eval_results/combine
+        --episodes 0 --s1-port 8060 --s2-port 8100 \
+        --norm-stats <ckpt>/assets/robocasa_system1/norm_stats.json --out-root results/one
 
-Short-goal arm (terse goals instead of the dataset's, 16 composite-unseen tasks x 30 episodes):
-    USE_EVAL_SET=1 TASK_SET=composite_unseen \
-      GOAL_JSON=/home/ec2-user/composite_unseen_short_goal.json \
-      RUN_LABEL=s1-progact270k_s2-qwen35-4b-full-ep3-11416-unseenshort \
-      METHOD=progact STEP=269999 TASK_RULES=1 bash examples/robocasa/run_combine_fleet.sh
 The goal map lives OUTSIDE the repo (it is data, not code); its content hash goes into the run's
-rule_config.json, so editing it between sweeps cannot silently mix two goal styles in one method.
+lang_steer_config.json, so editing it between sweeps cannot silently mix two goal styles in one method.
 """
 
 from __future__ import annotations
@@ -639,8 +634,8 @@ TURN_DEF_OFFSET = 2    # +1 task_begin unroll, +1 possible task_finish turn
 def _turn_bonus() -> dict[str, int]:
     """Per-task turn-budget bonus, from SYS2_TURN_BONUS="Task:2,Other:3". Empty unless set.
 
-    A turn bonus cannot be a sys2_steering rule: max_turns is resolved ONCE before the turn loop, so
-    nothing a rule returns mid-episode can change it. This is the experimental hook for "give task X
+    A turn bonus cannot be a sys2_steering steer: max_turns is resolved ONCE before the turn loop, so
+    nothing a steer returns mid-episode can change it. This is the experimental hook for "give task X
     +2 turns" -- inert when the variable is unset, and the bonus is written into max_turns_reason so
     every episode.json records whether it was applied.
     """
@@ -933,14 +928,14 @@ def run_s1_segment(
     last_cmd_grip_init: float, zero_arm_in_base: bool, act_override: dict | None = None,
     force_steps: int = 0, step_callback=None, should_cancel=None,
 ) -> dict:
-    """Roll System1 on ONE System2 subgoal until the stop rule fires or the budget runs out.
+    """Roll System1 on ONE System2 subgoal until the stop criterion fires or the budget runs out.
 
     Mirrors episode_eval's rollout but is driven by a System2 subgoal + estimated_step instead of
     an annotated span, and records everything the GUI needs. ``executed_step`` starts at 0 for
     every call (per-turn reset) and the anchor is whatever the caller snapshotted at segment start.
 
-    ``force_steps`` > 0 SUPPRESSES BOTH STOP RULES for the first ``force_steps`` executed steps, so
-    the segment runs at least that long. It exists for genuine WAIT subgoals, where the stop rule is
+    ``force_steps`` > 0 SUPPRESSES BOTH STOP CRITERIA for the first ``force_steps`` executed steps, so
+    the segment runs at least that long. It exists for genuine WAIT subgoals, where the stop criterion is
     structurally wrong rather than merely mistuned: a waiting arm commands no motion, so action
     quiescence is satisfied on the very first window and the segment ends while the physical process
     (a toaster) is still running. The DENSE ``_check_success()`` break is deliberately NOT
@@ -1047,7 +1042,7 @@ def run_s1_segment(
         # steps and progress is at threshold (and the gripper has settled, if it flipped), the
         # subgoal is done -- executing those quiescent actions would only burn sim steps + renders.
         if replanned and executed >= force_steps and tracker.should_stop_lookahead(chunk_sim):
-            stop_reason = "stop_rule_lookahead"
+            stop_reason = "stop_criterion_lookahead"
             stop_debug = tracker.debug()
             break
 
@@ -1134,7 +1129,7 @@ def run_s1_segment(
             stop_reason = "forced_steps"
             continue
         if tracker.should_stop():
-            stop_reason = "stop_rule"
+            stop_reason = "stop_criterion"
             stop_debug = tracker.debug()
             break
 
@@ -1174,7 +1169,7 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
     # GOAL OVERRIDE. --goal-json maps task_name -> the goal string to use INSTEAD of the dataset's
     # ep_meta['lang']. Applied here, at the single point the goal enters the loop, so every consumer
     # sees only the replacement: System2's plan-mode prompt, every exec-turn prompt, and System1's
-    # "Task: <goal>" prefix. Nothing else is touched -- same episodes, same scene, same rules.
+    # "Task: <goal>" prefix. Nothing else is touched -- same episodes, same scene, same steers.
     # The original is kept in the record so a run can always be told apart from a full-goal one.
     instruction_original = instruction
     goal_override = None
@@ -1202,7 +1197,7 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
         "goal_json": args.goal_json or None,
         "method": method, "eval_kind": "combine",
         "lerobot_dir": str(ld), "episode_index": ep_index,
-        "rule_config": _rule_config(args),
+        "lang_steer_config": _lang_steer_config(args),
         "config": {
             "reset_mode": "reset_to(states[0]) from the raw LeRobot episode (no annotations)",
             "s1_port": args.s1_port, "s2_port": args.s2_port, "s2_model": args.s2_model,
@@ -1222,11 +1217,11 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
         "turns": [],
     }
 
-    # Per-EPISODE rule state (skip counters) and the running intervention log. Both are
+    # Per-EPISODE steer state (skip counters) and the running intervention log. Both are
     # per-episode by construction: a fresh dict here means one episode's skips can never
     # leak into the next.
-    rule_state: dict = {}
-    ep_rule_log: list[dict] = []
+    steer_state: dict = {}
+    ep_steer_log: list[dict] = []
     ep_timings: dict[str, list[float]] = {
         "env_make": [], "env_reset": [], "s2_plan": [], "s2_exec": [], "video_encode": [],
     }
@@ -1268,29 +1263,29 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
         doc["config"]["plan_variant"] = res.get("variant", "cold")
         if not plan:
             raise ValueError("System2 returned no <plan>")
-        # PLAN-MODE rules: the one place a rule can replace the checklist itself. Runs once, here;
+        # PLAN-MODE steers: the one place a steer can replace the checklist itself. Runs once, here;
         # during the exec loop the plan is then maintained as usual (System2's plan_update marks
-        # progress), so no rule has to reconstruct the marks. episode.json["plan"]["s2_plan_before_
-        # rules"] keeps what System2 actually emitted, so the override is always auditable.
-        # Every plan rule is gated on one task, so this is the TASK tier -- a general-only arm does
+        # progress), so no steer has to reconstruct the marks. episode.json["plan"]
+        # ["s2_plan_before_lang_steer"] keeps what System2 actually emitted, so the override is always auditable.
+        # Every plan steer is gated on one task, so this is the TASK tier -- a general-only arm does
         # not get it.
-        if args.task_rules:
-            pr = SR.apply_plan_rules(task_name, plan=plan)
-            # Apply the revision whenever the plan actually changed -- NOT only when the rule also
+        if args.task_lang_steer:
+            pr = SR.apply_plan_lang_steer(task_name, plan=plan)
+            # Apply the revision whenever the plan actually changed -- NOT only when the steer also
             # reported an intervention. Gating the assignment on ``interventions`` silently discarded
-            # the override of any rule that forgot to log one, which is a void experiment that still
+            # the override of any steer that forgot to log one, which is a void experiment that still
             # looks like a clean run.
             if pr["plan"] != plan:
-                doc["plan"]["s2_plan_before_rules"] = plan
+                doc["plan"]["s2_plan_before_lang_steer"] = plan
                 plan = pr["plan"]
-                doc["plan"]["plan_after_rules"] = plan
+                doc["plan"]["plan_after_lang_steer"] = plan
             if pr["interventions"]:
-                ep_rule_log.append({"turn": "plan", "interventions": pr["interventions"]})
+                ep_steer_log.append({"turn": "plan", "interventions": pr["interventions"]})
                 for _iv in pr["interventions"]:
-                    print(f"  RULE [{_iv['kind']}] {_iv['rule']}: plan-mode override", flush=True)
-            elif pr["plan"] != doc["plan"].get("s2_plan_before_rules", plan):
-                print("  WARNING: a plan-mode rule changed the plan without logging an "
-                      "intervention -- applied anyway, but fix the rule", flush=True)
+                    print(f"  STEER [{_iv['kind']}] {_iv['steer']}: plan-mode override", flush=True)
+            elif pr["plan"] != doc["plan"].get("s2_plan_before_lang_steer", plan):
+                print("  WARNING: a plan-mode steer changed the plan without logging an "
+                      "intervention -- applied anyway, but fix the steer", flush=True)
 
         # ---------------- EXEC loop ----------------
         last_cmd_grip = 0.0
@@ -1315,7 +1310,7 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             print(f"  rollout limit: {turn_guard} turns ({rollout_limit['reason']})", flush=True)
         else:
             # There is deliberately no total-turn guard in official-step mode. This counter catches
-            # only a consecutive zero-env-step loop (normally repeated rule skips), and resets as
+            # only a consecutive zero-env-step loop (normally repeated steer skips), and resets as
             # soon as System1 actually advances the simulator.
             turn_guard = None
             zero_step_safety = _positive_int(args.max_s2_calls_safety,
@@ -1343,7 +1338,7 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             grip_status = _gripper_status(seg_grip_cmds) or ("close" if last_cmd_grip > 0 else "open")
 
             # -- System2: what next? --
-            # HELD TURN. A rule borrowed the PREVIOUS turn (a re-grasp, an extra carry), so the
+            # HELD TURN. A steer borrowed the PREVIOUS turn (a re-grasp, an extra carry), so the
             # subgoal System2 proposed then has not been executed yet. There is nothing for it to
             # judge and nothing new to decide, so it is NOT queried: the held subgoal runs against the
             # unchanged plan, and the next real query sees the clip of THAT segment.
@@ -1353,29 +1348,29 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             # step System1 had not finished, and the fine step System2 proposed was SWALLOWED:
             # PackIdenticalLunches ep0 proposed "search for the counter" (M14.1) on the resume turn,
             # it was thrown away, and the next turn marked M14.1 [x] though it never ran.
-            # UNCONDITIONAL: pending_resume returns None unless a rule actually borrowed the
+            # UNCONDITIONAL: pending_resume returns None unless a steer actually borrowed the
             # previous turn, so the gate was redundant when the whole layer was one switch -- and it
-            # became a BUG once a borrow-a-turn rule moved to the general tier. regrasp_recovery holds
-            # System2's subgoal and resumes it next turn; with this gated on --task-rules, a general-
+            # became a BUG once a borrow-a-turn steer moved to the general tier. regrasp_recovery holds
+            # System2's subgoal and resumes it next turn; with this gated on --task-lang-steer, a general-
             # only arm would borrow the turn and then never resume, silently dropping the held subgoal
             # and advancing the checklist past a step System1 never ran (the PackIdenticalLunches ep0
             # failure described above, which is exactly what the hold exists to prevent).
-            held = SR.pending_resume(rule_state)
+            held = SR.pending_resume(steer_state)
             _t = time.perf_counter()
             if held:
-                s2 = {"held_by_rule": held["rule"], "subgoal": held["subgoal"],
+                s2 = {"held_by_steer": held["steer"], "subgoal": held["subgoal"],
                       "subgoal_detail": held.get("subgoal_detail") or held["subgoal"],
                       "estimated_step": held.get("est"), "judge": None,
                       "held_kind": held.get("held_kind", "s2_resume"),
                       "thought": (
-                          f"System2 NOT queried: {held['rule']} is replaying the intervening "
+                          f"System2 NOT queried: {held['steer']} is replaying the intervening "
                           "effective subgoal after an offset+2 reach-back, before resuming the "
                           "held System2 subgoal."
                           if held.get("held_kind") == "offset2_replay" else
-                          f"System2 NOT queried: {held['rule']} borrowed turn {turn - 1}, so "
+                          f"System2 NOT queried: {held['steer']} borrowed turn {turn - 1}, so "
                           "the subgoal it proposed there runs now against the same plan."),
                       "plan_update": None}
-                s2_media = {"held_by_rule": held["rule"],
+                s2_media = {"held_by_steer": held["steer"],
                             "held_kind": held.get("held_kind", "s2_resume")}
                 s2_user = None
                 plan_in = plan          # unchanged: no plan_update is applied on a held turn
@@ -1389,9 +1384,9 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
                 s2_media = {"image": sc}
                 s2_user = S2C.user_exec_first(instruction, plan)
                 # The plan actually HANDED TO System2 for this call. Recorded because it cannot be
-                # reconstructed from the previous turn's plan_after once a rule revises the plan and
+                # reconstructed from the previous turn's plan_after once a steer revises the plan and
                 # re-queries within the same turn (repeat_cap's milestone close, coffee_skip_failed):
-                # the GUI used to derive "plan handed in" from turn-1 and so showed the pre-rule plan.
+                # the GUI used to derive "plan handed in" from turn-1 and so showed the pre-steer plan.
                 plan_in = plan
                 clip_stats = None
             else:
@@ -1421,75 +1416,75 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             sg_detail = (s2.get("subgoal_detail") or "").strip()
             est = s2.get("estimated_step")
 
-            # ---- THE RULE LAYER, IN TWO TIERS -----------------------------------------------
-            # MANDATORY (repeat_cap) runs on EVERY run, with or without --task-rules: it is the
+            # ---- THE STEER LAYER, IN TWO TIERS -----------------------------------------------
+            # MANDATORY (repeat_cap) runs on EVERY run, with or without --task-lang-steer: it is the
             # loop's termination policy, not a revision of System2's output. Without it a stuck
-            # subgoal is re-issued until max_turns with nothing advancing, so a "no rules" arm
+            # subgoal is re-issued until max_turns with nothing advancing, so a "no steers" arm
             # would measure the harness's inability to escape a repeat rather than the model. The
-            # no-rules baseline is therefore "repeat_cap only".
+            # no-lang-steer baseline is therefore "repeat_cap only".
             # OPTIONAL (general + per-task + the sys2_steering_exp*.py patch layer) is what
-            # --task-rules adds, and it is off by default. Tier selection lives in apply_rules, so
+            # --task-lang-steer adds, and it is off by default. Tier selection lives in apply_lang_steer, so
             # this call is UNCONDITIONAL and passes the flag through.
             # The revised PLAN is assigned back to `plan`, which is what gets fed to every later
-            # exec_turn -- so a rule's plan edit becomes System2's context for the rest of the
+            # exec_turn -- so a steer's plan edit becomes System2's context for the rest of the
             # episode, exactly like a model-authored <plan_update>.
-            # System2's OWN output, kept verbatim for the record. The rules below rebind
+            # System2's OWN output, kept verbatim for the record. The steers below rebind
             # `subgoal`/`est`/`plan` to the EFFECTIVE values handed to System1; these three keep
             # what the model actually said, so turn.json's "s2" block never misreports the planner
-            # (its <estimated_step> stays whatever it emitted, even when a rule overrode the budget
+            # (its <estimated_step> stays whatever it emitted, even when a steer overrode the budget
             # in flight). The raw response string is never touched.
             s2_subgoal, s2_sg_detail, s2_est, s2_plan = subgoal, sg_detail, est, plan
-            rule_ivs: list[dict] = []
+            steer_ivs: list[dict] = []
             skip_s1 = False
             tx_label = held.get("tx_label") if held else None
             force_steps = 0
             rr_stop = False
             suppress_task_finish = False
-            # Reset per turn: a HELD turn skips the rule call below, and without this rr would still
+            # Reset per turn: a HELD turn skips the steer call below, and without this rr would still
             # be the PREVIOUS turn's result -- a stale requery_s2 would fire a spurious second
             # System2 call. (Latent before the mandatory tier existed, because the requery guard also
-            # tested args.task_rules; now that the guard is unconditional it would be reachable.)
+            # tested args.task_lang_steer; now that the guard is unconditional it would be reachable.)
             rr: dict = {}
-            s2_requery = None          # the SECOND System2 response, when a rule asked for one
-            # A held turn is ALREADY a rule decision: the subgoal is the one System2 proposed last
-            # turn and a rule deferred. Re-running the rule layer over it would let the same rule that
+            s2_requery = None          # the SECOND System2 response, when a steer asked for one
+            # A held turn is ALREADY a steer decision: the subgoal is the one System2 proposed last
+            # turn and a steer deferred. Re-running the steer layer over it would let the same steer that
             # borrowed the turn look at the same plan and borrow again (its own counter guards that,
-            # but the est rules would also re-fire on a subgoal whose est was resolved a turn ago).
-            # So the rules are skipped and the held values are used verbatim.
+            # but the est steers would also re-fire on a subgoal whose est was resolved a turn ago).
+            # So the steers are skipped and the held values are used verbatim.
             if not held:
-                # Rules that act on System2's judgement (rather than merely its wording) read the
+                # Steers that act on System2's judgement (rather than merely its wording) read the
                 # current value from the shared per-episode state. Assign even when None so a stale
                 # subgoal_failed can never leak from the previous turn.
-                rule_state["judge"] = judge
-                rr = SR.apply_rules(task_name, plan=plan, subgoal=subgoal,
-                                    subgoal_detail=sg_detail, est=est, state=rule_state,
-                                    general=bool(args.general_rules), task_tier=bool(args.task_rules),
+                steer_state["judge"] = judge
+                rr = SR.apply_lang_steer(task_name, plan=plan, subgoal=subgoal,
+                                    subgoal_detail=sg_detail, est=est, state=steer_state,
+                                    general=bool(args.general_lang_steer), task_tier=bool(args.task_lang_steer),
                                     task_status=task_status,
                                     last_milestone_retry=bool(args.last_milestone_retry))
                 plan, subgoal, sg_detail, est = rr["plan"], rr["subgoal"], rr["subgoal_detail"], rr["est"]
                 skip_s1 = rr["skip_s1"]
                 tx_label = rr.get("tx_label")
-                # force_steps: run EXACTLY this many steps, ignoring the stop rule and the
+                # force_steps: run EXACTLY this many steps, ignoring the stop criterion and the
                 # --max-steps-cap ceiling. For a genuine wait ("wait for the bread to pop up") the
-                # stop rule is structurally wrong -- a waiting arm is quiescent by definition, so
+                # stop criterion is structurally wrong -- a waiting arm is quiescent by definition, so
                 # quiescence fires immediately and the segment ends while the toaster is still
-                # running. Only a rule can know a subgoal is a wait, hence the channel.
+                # running. Only a steer can know a subgoal is a wait, hence the channel.
                 force_steps = int(rr.get("force_steps") or 0)
                 rr_stop = bool(rr.get("stop_episode"))
                 suppress_task_finish = bool(rr.get("suppress_task_finish"))
-                rule_ivs = rr["interventions"]
-                if rule_ivs:
-                    ep_rule_log.append({"turn": turn, "interventions": rule_ivs})
-                    for _iv in rule_ivs:
-                        print(f"  RULE [{_iv['kind']}] {_iv['rule']}: "
+                steer_ivs = rr["interventions"]
+                if steer_ivs:
+                    ep_steer_log.append({"turn": turn, "interventions": steer_ivs})
+                    for _iv in steer_ivs:
+                        print(f"  STEER [{_iv['kind']}] {_iv['steer']}: "
                               f"{_iv['before']} -> {_iv['after']}", flush=True)
 
-            # -- RULE RE-QUERY: the plan moved on, so ask System2 again THIS turn ---------------
+            # -- STEER RE-QUERY: the plan moved on, so ask System2 again THIS turn ---------------
             # repeat_cap closed a stuck milestone because there was no next fine step to advance into.
             # Re-running the exhausted subgoal would waste the turn, so System2 is asked again with the
             # revised checklist and ITS new subgoal is what System1 executes. One extra S2 call (~2-4s)
-            # and at most ONE per turn: the rule resets its repeat counter when it closes a milestone,
-            # so the re-applied rules cannot ask again and walk the whole plan.
+            # and at most ONE per turn: the steer resets its repeat counter when it closes a milestone,
+            # so the re-applied steers cannot ask again and walk the whole plan.
             if rr.get("requery_s2"):
                 _t2 = time.perf_counter()
                 if turn == 0:
@@ -1509,10 +1504,10 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
                 est = s2.get("estimated_step")
                 plan = S2C.apply_plan_update(plan, s2.get("plan_update"))
                 s2_subgoal, s2_sg_detail, s2_est, s2_plan = subgoal, sg_detail, est, plan
-                rule_state["judge"] = judge
-                rr = SR.apply_rules(task_name, plan=plan, subgoal=subgoal,
-                                    subgoal_detail=sg_detail, est=est, state=rule_state,
-                                    general=bool(args.general_rules), task_tier=bool(args.task_rules),
+                steer_state["judge"] = judge
+                rr = SR.apply_lang_steer(task_name, plan=plan, subgoal=subgoal,
+                                    subgoal_detail=sg_detail, est=est, state=steer_state,
+                                    general=bool(args.general_lang_steer), task_tier=bool(args.task_lang_steer),
                                     task_status=task_status,
                                     last_milestone_retry=bool(args.last_milestone_retry))
                 plan, subgoal, sg_detail, est = (rr["plan"], rr["subgoal"],
@@ -1521,33 +1516,33 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
                 force_steps = int(rr.get("force_steps") or 0)
                 rr_stop = bool(rr.get("stop_episode"))
                 suppress_task_finish = bool(rr.get("suppress_task_finish"))
-                rule_ivs = rule_ivs + rr["interventions"]
+                steer_ivs = steer_ivs + rr["interventions"]
                 if rr["interventions"]:
-                    ep_rule_log.append({"turn": turn, "requery": True,
+                    ep_steer_log.append({"turn": turn, "requery": True,
                                         "interventions": rr["interventions"]})
-                print(f"  RULE re-queried System2 after the milestone close -> {subgoal!r}", flush=True)
+                print(f"  STEER re-queried System2 after the milestone close -> {subgoal!r}", flush=True)
 
             turn_rec: dict = {
                 "turn": turn, "dir": tdir.name,
                 "s2": {
                     "system_prompt": (S2C.SYS_EXEC),
                     "user_prompt": s2_user,
-                    # The checklist this System2 call actually received (post-rule on a re-query).
+                    # The checklist this System2 call actually received (post-steer on a re-query).
                     "plan_in": plan_in,
                     "response_raw": s2.get("raw"),
                     "thought": s2.get("thought"), "judge": judge, "judge_raw": s2.get("judge_raw"),
-                    # PRE-rule: what System2 itself emitted (see s2_* capture above).
+                    # PRE-steer: what System2 itself emitted (see s2_* capture above).
                     "plan_update": s2.get("plan_update"), "estimated_step": s2_est,
-                    # Set when a rule closed a milestone and System2 was asked again the same turn:
+                    # Set when a steer closed a milestone and System2 was asked again the same turn:
                     # this is the FIRST (superseded) response; the block around it is the second.
                     "superseded_by_requery": ({"subgoal": s2_prev.get("subgoal"),
                                                "response_raw": s2_prev.get("raw")}
                                               if s2_requery is not None else None),
                     "subgoal": s2_subgoal, "subgoal_detail": s2_sg_detail,
-                    # Names the rule that borrowed the PREVIOUS turn when System2 was not queried at
+                    # Names the steer that borrowed the PREVIOUS turn when System2 was not queried at
                     # all this turn -- so "no user_prompt / no judge" reads as deliberate rather than
                     # as a missing record.
-                    "held_by_rule": s2.get("held_by_rule"),
+                    "held_by_steer": s2.get("held_by_steer"),
                     "held_kind": s2.get("held_kind"),
                     "latency_s": s2.get("latency_s"), "usage": s2.get("usage"),
                     "nframes_requested": s2.get("nframes"),
@@ -1557,20 +1552,20 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
                 },
                 "plan_after": plan,
                 # Full audit trail: what System2 actually said, and every override applied to it.
-                # Empty list == no rule fired, so an unrevised turn is unambiguous.
-                # New runs use the run-level rule_config.json as the source of truth. Keep this
+                # Empty list == no steer fired, so an unrevised turn is unambiguous.
+                # New runs use the run-level lang_steer_config.json as the source of truth. Keep this
                 # per-turn bit for old readers, but make it mean what it says: at least one tier ran.
-                "rules": {"enabled": _rules_present(args),
-                          "tier": _rule_tier(args),
-                          "interventions": rule_ivs,
-                          # set when a rule INJECTED this turn rather than System2 asking for it
+                "steers": {"enabled": _lang_steer_present(args),
+                          "tier": _lang_steer_tier(args),
+                          "interventions": steer_ivs,
+                          # set when a steer INJECTED this turn rather than System2 asking for it
                           "tx_label": tx_label,
                           # What System1 was ACTUALLY given, after any override. Equal to the "s2"
-                          # block above when no rule fired, so the two are always comparable.
+                          # block above when no steer fired, so the two are always comparable.
                           "effective": {"subgoal": subgoal, "subgoal_detail": sg_detail,
                                         "estimated_step": est,
                                         "task_finish_suppressed": suppress_task_finish},
-                          "s2_plan_before_rules": (s2_plan if s2_plan != plan else None)},
+                          "s2_plan_before_lang_steer": (s2_plan if s2_plan != plan else None)},
             }
 
             if judge == "task_finish" and not suppress_task_finish:
@@ -1581,8 +1576,8 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
                                     | {"judge": judge, "subgoal": None, "n_steps": 0})
                 turn += 1
                 break
-            # -- RULE STOP: the repeat cap gave up on a loop it cannot break --------------------
-            # A rule asked to end the episode. Today only repeat_cap does, when the same subgoal has
+            # -- STEER STOP: the repeat cap gave up on a loop it cannot break --------------------
+            # A steer asked to end the episode. Today only repeat_cap does, when the same subgoal has
             # been re-issued past the cap AND there is no next fine step and no later milestone to
             # advance into, MAX_CAP_DECLINES times over. Such an episode is effectively dead --
             # measured over two 1500-episode sweeps it succeeded 1.5% / 2.3% of the time, against ~65%
@@ -1607,20 +1602,20 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
                 turn += 1
                 break
 
-            # -- RULE SKIP: this turn runs NO System1 segment ---------------------------------
-            # The rule already marked the step done in `plan`, so next turn System2 sees it
+            # -- STEER SKIP: this turn runs NO System1 segment ---------------------------------
+            # The steer already marked the step done in `plan`, so next turn System2 sees it
             # completed and moves on. prev_clip_path is deliberately left untouched: no segment
             # ran, so there is no new video and System2 re-reads the previous one. The env is not
             # stepped, so success state is unchanged.
             if skip_s1:
                 turn_rec["s1"] = None
-                turn_rec["s1_skipped_by_rule"] = True
+                turn_rec["s1_skipped_by_steer"] = True
                 _write_json(tdir / "turn.json", turn_rec)
                 doc["turns"].append({"turn": turn, "dir": tdir.name, "judge": judge,
                                      "subgoal": subgoal, "n_steps": 0,
-                                     "s1_skipped_by_rule": True,
-                                     "rules": turn_rec["rules"], "plan_after": plan})
-                print(f"  turn {turn}: System1 SKIPPED by rule (subgoal={subgoal!r})", flush=True)
+                                     "s1_skipped_by_steer": True,
+                                     "steers": turn_rec["steers"], "plan_after": plan})
+                print(f"  turn {turn}: System1 SKIPPED by steer (subgoal={subgoal!r})", flush=True)
                 turn += 1
                 if rollout_limit["mode"] == "max_official_steps":
                     zero_step_streak += 1
@@ -1636,21 +1631,21 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
 
             # Per-step action override for this segment (gripper pinning); {} when none applies.
             act_override = SR.action_overrides(task_name, plan, subgoal,
-                                       task_tier=bool(args.task_rules))
+                                       task_tier=bool(args.task_lang_steer))
             if act_override:
-                rule_ivs.append({"rule": "action_override", "kind": "action_override",
+                steer_ivs.append({"steer": "action_override", "kind": "action_override",
                                  "detail": act_override.get("why", ""),
                                  "before": "System1 gripper command",
                                  "after": f"pinned to {act_override.get('grip')}"})
-                ep_rule_log.append({"turn": turn, "interventions": rule_ivs[-1:]})
-                print(f"  RULE [action_override] {act_override.get('why','')}", flush=True)
-                turn_rec["rules"]["interventions"] = rule_ivs
+                ep_steer_log.append({"turn": turn, "interventions": steer_ivs[-1:]})
+                print(f"  STEER [action_override] {act_override.get('why','')}", flush=True)
+                turn_rec["steers"]["interventions"] = steer_ivs
             est_eff = int(est) if isinstance(est, int) and est > 0 else args.default_est_length
             budget = int(min(args.max_steps_cap, max(1, round(est_eff * args.horizon_mult))))
             # force_steps DELIBERATELY BYPASSES --max-steps-cap. The cap is a global guard against
-            # one subgoal eating the whole episode; a rule that names an exact step count has
+            # one subgoal eating the whole episode; a steer that names an exact step count has
             # already made that judgement for this subgoal, and clamping it to the cap would
-            # silently deliver a different number than the rule asked for (with a 400 cap, a
+            # silently deliver a different number than the steer asked for (with a 400 cap, a
             # 1200-step wait would run 400). Recorded in turn.json as forced_steps so a segment
             # longer than the cap is never mysterious.
             if force_steps > 0:
@@ -1658,7 +1653,7 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             budget_before_episode_cap = budget
             force_steps_requested = force_steps
             if rollout_limit["mode"] == "max_official_steps":
-                # This is the actual benchmark boundary, so it also clips rule-forced waits that
+                # This is the actual benchmark boundary, so it also clips steer-forced waits that
                 # deliberately bypass the ordinary per-segment --max-steps-cap.
                 remaining = int(rollout_limit["max_official_steps"] - episode_steps)
                 budget = min(budget, remaining)
@@ -1686,20 +1681,20 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             doc["n_env_steps"] = episode_steps
             # Offset+2 regrasp recovery needs the ONE effective segment executed between the
             # original grasp and the detected drop. Snapshot every completed System1 segment here;
-            # the recovery rule copies the relevant record before its injected reach-back replaces
+            # the recovery steer copies the relevant record before its injected reach-back replaces
             # this slot on the following segment.
             SR.record_executed_subgoal(
-                rule_state, subgoal=subgoal, subgoal_detail=sg_detail, est=est,
+                steer_state, subgoal=subgoal, subgoal_detail=sg_detail, est=est,
             )
-            # Expose the gripper WIDTH left by this segment to the rules, so a rule can react to the
+            # Expose the gripper WIDTH left by this segment to the steers, so a steer can react to the
             # physical outcome rather than only to System2's text. Read on the NEXT turn, when the
             # env is still in the pose this segment ended in -- e.g. a near-zero width after a grasp
             # means the fingers closed on nothing. Taken from the recorded steps rather than a fresh
             # observation, so it costs no extra render.
             _gw = [x.get("grip_width") for x in steps if x.get("grip_width") is not None]
             if _gw:
-                rule_state["grip_width"] = float(_gw[-1])
-                rule_state["grip_width_min"] = float(min(_gw))
+                steer_state["grip_width"] = float(_gw[-1])
+                steer_state["grip_width_min"] = float(min(_gw))
             motion = roll.pop("_motion")
             seg_grip_cmds = roll.get("grip_cmds") or []
             last_cmd_grip = roll["last_cmd_grip"]
@@ -1769,7 +1764,7 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             })
             turn_rec["s1"] = {
                 "prompt_text": s1_text, "est_length": est_eff, "budget": budget,
-                # Non-zero only when a rule forced the segment length; makes a segment that exceeds
+                # Non-zero only when a steer forced the segment length; makes a segment that exceeds
                 # --max-steps-cap self-explanatory in the record and in the GUI.
                 "forced_steps": force_steps or None,
                 "forced_steps_requested": (force_steps_requested
@@ -1824,17 +1819,17 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
         doc["n_turns"] = turn
         doc["n_env_steps"] = episode_steps
         doc["termination"] = term
-        # Episode-level rule summary: the per-turn detail lives in each turn.json, this is the
-        # roll-up the report script and the GUI read. `rule_interventions: []` with
-        # `task_rules: true` means the rules were ON but nothing matched this episode.
-        doc["task_rules"] = bool(args.task_rules)
-        doc["general_rules"] = bool(args.general_rules)
+        # Episode-level steer summary: the per-turn detail lives in each turn.json, this is the
+        # roll-up the report script and the GUI read. `lang_steer_interventions: []` with
+        # `task_lang_steer: true` means the steers were ON but nothing matched this episode.
+        doc["task_lang_steer"] = bool(args.task_lang_steer)
+        doc["general_lang_steer"] = bool(args.general_lang_steer)
         doc["last_milestone_retry"] = bool(args.last_milestone_retry)
-        # The mandatory tier (repeat_cap) runs regardless; task_rules above is the
+        # The mandatory tier (repeat_cap) runs regardless; task_lang_steer above is the
         # OPTIONAL tier only. Recorded explicitly so an arm is self-describing.
-        doc["rule_tier"] = _rule_tier(args)
-        doc["rule_interventions"] = ep_rule_log
-        doc["n_rule_interventions"] = sum(len(t["interventions"]) for t in ep_rule_log)
+        doc["lang_steer_tier"] = _lang_steer_tier(args)
+        doc["lang_steer_interventions"] = ep_steer_log
+        doc["n_lang_steer_interventions"] = sum(len(t["interventions"]) for t in ep_steer_log)
         doc["episode_success"] = bool(env._check_success())
         doc["final_plan"] = plan
         doc["seconds"] = round(time.time() - t0, 2)
@@ -1857,13 +1852,13 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
         return doc
 
     except Exception as e:
-        doc["task_rules"] = bool(args.task_rules)
-        doc["general_rules"] = bool(args.general_rules)
+        doc["task_lang_steer"] = bool(args.task_lang_steer)
+        doc["general_lang_steer"] = bool(args.general_lang_steer)
         doc["last_milestone_retry"] = bool(args.last_milestone_retry)
-        # The mandatory tier (repeat_cap) runs regardless; task_rules above is the
+        # The mandatory tier (repeat_cap) runs regardless; task_lang_steer above is the
         # OPTIONAL tier only. Recorded explicitly so an arm is self-describing.
-        doc["rule_tier"] = _rule_tier(args)
-        doc["rule_interventions"] = ep_rule_log
+        doc["lang_steer_tier"] = _lang_steer_tier(args)
+        doc["lang_steer_interventions"] = ep_steer_log
         doc["error"] = f"{type(e).__name__}: {e}"
         doc["traceback"] = traceback.format_exc()
         doc["seconds"] = round(time.time() - t0, 2)
@@ -1877,35 +1872,35 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
             pass
 
 
-def _rule_tier(args) -> str:
-    """Which rule tiers this run applied -- recorded so an arm is self-describing.
+def _lang_steer_tier(args) -> str:
+    """Which steer tiers this run applied -- recorded so an arm is self-describing.
 
     Ordinary tiers remain mandatory/general/task. The independently switchable ``horizon_retry``
-    suffix records the strong last-milestone replay rule, which always executes after those tiers.
+    suffix records the strong last-milestone replay steer, which always executes after those tiers.
     A leading "none" appears only when the mandatory tier was explicitly disabled.
     """
     tiers = ["mandatory"] if SR.mandatory_on() else ["none"]
-    if getattr(args, "general_rules", False):
+    if getattr(args, "general_lang_steer", False):
         tiers.append("general")
-    if getattr(args, "task_rules", False):
+    if getattr(args, "task_lang_steer", False):
         tiers.append("task")
     if getattr(args, "last_milestone_retry", False):
         tiers.append("horizon_retry")
     return "+".join(tiers)
 
 
-def _rule_config(args) -> dict:
+def _lang_steer_config(args) -> dict:
     """Stable, serializable configuration shared by result files and the GUI."""
-    cfg = SR.rule_config(general=bool(getattr(args, "general_rules", False)),
-                         task_tier=bool(getattr(args, "task_rules", False)),
+    cfg = SR.lang_steer_config(general=bool(getattr(args, "general_lang_steer", False)),
+                         task_tier=bool(getattr(args, "task_lang_steer", False)),
                          last_milestone_retry=bool(
                              getattr(args, "last_milestone_retry", False)))
-    return {**cfg, "tier": _rule_tier(args)}
+    return {**cfg, "tier": _lang_steer_tier(args)}
 
 
-def _rules_present(args) -> bool:
-    cfg = _rule_config(args)
-    return bool(cfg["mandatory_rules"] or cfg["general_rules"] or cfg["task_rules"]
+def _lang_steer_present(args) -> bool:
+    cfg = _lang_steer_config(args)
+    return bool(cfg["mandatory_lang_steer"] or cfg["general_lang_steer"] or cfg["task_lang_steer"]
                 or cfg["last_milestone_retry"])
 
 
@@ -1977,23 +1972,23 @@ def _capture_fingerprint(args) -> dict:
     }
 
 
-def _write_run_rule_config(out_root: Path, method: str, args) -> dict:
+def _write_run_lang_steer_config(out_root: Path, method: str, args) -> dict:
     """Persist the run configuration and refuse to mix incompatible arms in one directory."""
-    # The guard covers the GOAL SOURCE and PLAN VARIANT as well as the rule tiers. A --goal-json run,
+    # The guard covers the GOAL SOURCE and PLAN VARIANT as well as the steer tiers. A --goal-json run,
     # a cold plan, and a memory plan built from a particular recipe library are different arms; with
     # a reused --method/--resume they would otherwise merge into one directory and one success rate.
     # Variant clients set ``run_plan_config`` before calling run_sweep. The ordinary client gets an
     # explicit cold marker, so accidentally reusing a memory label for a cold run is caught too.
     plan_cfg = getattr(args, "run_plan_config", None) or {"mode": "cold"}
-    cfg = {**_rule_config(args), "goal": _goal_fingerprint(args), "plan": plan_cfg,
+    cfg = {**_lang_steer_config(args), "goal": _goal_fingerprint(args), "plan": plan_cfg,
            "rollout_limit": _rollout_limit_fingerprint(args),
            "capture": _capture_fingerprint(args)}
-    path = out_root / method / "rule_config.json"
+    path = out_root / method / "lang_steer_config.json"
     if path.exists():
         try:
             old = json.loads(path.read_text())
         except Exception as e:
-            raise RuntimeError(f"invalid existing rule config {path}: {e}") from e
+            raise RuntimeError(f"invalid existing language steering config {path}: {e}") from e
         # Compare only the keys BOTH sides carry, then merge forward. A guard written by an older
         # revision simply lacks the newer keys, and refusing on that would abort every remaining
         # episode of a sweep that is already running correctly -- schema growth is not an arm change.
@@ -2001,7 +1996,7 @@ def _write_run_rule_config(out_root: Path, method: str, args) -> dict:
         if clash:
             raise RuntimeError(
                 f"run configuration mismatch for method {method!r}: {clash}. Use a distinct "
-                "--method/RUN_LABEL for each evaluation arm (rule tier AND goal source).")
+                "--method/RUN_LABEL for each evaluation arm (steer tier AND goal source).")
         cfg = {**old, **cfg}
     _write_json(path, cfg)
     return cfg
@@ -2072,41 +2067,41 @@ def build_argparser(description: str | None = None) -> argparse.ArgumentParser:
                          "horizon_mult). BACK TO 400 (it was raised to 800 for one round of runs). "
                          "800 existed because the cap silently truncated long WAIT subgoals -- "
                          "GetToastedBread asks est 500-600, so est*2 was clipped and episodes were cut "
-                         "mid-wait. That is now handled properly by sys2_steering' wait rule, which "
+                         "mid-wait. That is now handled properly by sys2_steering' wait steer, which "
                          "returns ``force_steps`` and DELIBERATELY BYPASSES this cap, so the wait gets "
                          "its full length whatever the ceiling is -- and the ceiling can go back to "
                          "guarding against a runaway segment. Measured on the 800 run: only 112 of "
                          "13263 segments (0.8%%) had a budget above 400 and just 28 actually ran past "
                          "it, half of them the GetToastedBread waits that now bypass the cap. Runs at "
-                         "400 ARE step-for-step comparable with the 1000-episode no-rules baseline and "
+                         "400 ARE step-for-step comparable with the 1000-episode no-lang-steer baseline and "
                          "are NOT comparable with the -estbump sweep, which used 800.")
-    ap.add_argument("--general-rules", action=argparse.BooleanOptionalAction, default=True,
-                    help="the GENERAL (task-agnostic) rule tier. ON BY DEFAULT -- the full rule set "
-                         "is now the standard configuration; --no-general-rules drops this tier and "
-                         "--no-task-rules --no-general-rules gives the mandatory-only arm. "
-                         "Implied by --task-rules, so the three arms are: both off = mandatory only "
-                         "(repeat_cap, the '-base' arm); --general-rules = mandatory + general; "
-                         "--task-rules = mandatory + general + per-task. The general tier is "
-                         f"currently {SR.TASKS_WITH_RULES[1]}.")
-    ap.add_argument("--task-rules", action=argparse.BooleanOptionalAction, default=True,
-                    help="ON BY DEFAULT (use --no-task-rules to drop it). Adds the OPTIONAL rule "
+    ap.add_argument("--general-lang-steer", action=argparse.BooleanOptionalAction, default=True,
+                    help="the GENERAL (task-agnostic) steer tier. ON BY DEFAULT -- the full steer set "
+                         "is now the standard configuration; --no-general-lang-steer drops this tier and "
+                         "--no-task-lang-steer --no-general-lang-steer gives the mandatory-only arm. "
+                         "Implied by --task-lang-steer, so the three arms are: both off = mandatory only "
+                         "(repeat_cap, the '-base' arm); --general-lang-steer = mandatory + general; "
+                         "--task-lang-steer = mandatory + general + per-task. The general tier is "
+                         f"currently {SR.TASKS_WITH_STEERS[1]}.")
+    ap.add_argument("--task-lang-steer", action=argparse.BooleanOptionalAction, default=True,
+                    help="ON BY DEFAULT (use --no-task-lang-steer to drop it). Adds the OPTIONAL steer "
                          "tiers (general + per-task + any sys2_steering_exp*.py "
                          "patch file) on top of the MANDATORY tier. The mandatory tier -- repeat_cap "
                          "-- runs on EVERY run whether or not this flag is given, because it is the "
                          "loop's termination policy rather than a revision of System2's output: "
                          "without it a stuck subgoal is re-issued until max_turns with nothing "
-                         "advancing. So the no-rules baseline is 'repeat_cap only', and this flag "
+                         "advancing. So the no-lang-steer baseline is 'repeat_cap only', and this flag "
                          "chooses between the two arms. Scope, derived from the live registry: "
-                         f"{'; '.join(SR.TASKS_WITH_RULES)}. Every intervention is recorded under "
-                         "turn.json:rules (with the tier) and episode.json:rule_interventions. To "
-                         "reproduce the historical zero-rules baseline that predates the mandatory "
-                         "tier, set SYS2_RULES_NO_MANDATORY=1 as well.")
+                         f"{'; '.join(SR.TASKS_WITH_STEERS)}. Every intervention is recorded under "
+                         "turn.json:steers (with the tier) and episode.json:lang_steer_interventions. To "
+                         "reproduce the historical zero-lang-steer baseline that predates the mandatory "
+                         "tier, set SYS2_LANG_STEER_NO_MANDATORY=1 as well.")
     ap.add_argument(
         "--last-milestone-retry", action=argparse.BooleanOptionalAction, default=None,
-        help="independent HORIZON POST-RULE. When enabled, false task_finish, terminal retract/finish "
+        help="independent HORIZON POST-STEER. When enabled, false task_finish, terminal retract/finish "
              "wording, or repeat_cap max_cap restores and retries the final milestone until the "
-             "official step horizon is exhausted. It always runs after general/task rules. When "
-             "unspecified, it follows --general-rules for backward compatibility.",
+             "official step horizon is exhausted. It always runs after general/task steers. When "
+             "unspecified, it follows --general-lang-steer for backward compatibility.",
     )
     ap.add_argument("--default-est-length", type=int, default=50,
                     help="fallback when System2 omits/garbles <estimated_step>")
@@ -2138,19 +2133,19 @@ def build_argparser(description: str | None = None) -> argparse.ArgumentParser:
     ap.add_argument("--stop-window", type=int, default=5)
     ap.add_argument("--static-eps", type=float, default=S2C.STATIC_EPS,
                     help="motion-norm below this counts as a STATIC frame when condensing clips "
-                         "(10x stricter than the stop rule's --stop-eps on purpose; see sys2_client)")
+                         "(10x stricter than the stop criterion's --stop-eps on purpose; see sys2_client)")
     ap.add_argument("--stop-on-env-success", action="store_true", default=True)
     ap.add_argument("--no-zero-arm-in-base", action="store_true")
     return ap
 
 
 def run_sweep(args, *, method_suffix: str = "") -> None:
-    # The task tier sits on top of the general tier, so --task-rules implies --general-rules.
-    # Resolved ONCE here rather than at each use, so the rule call, the recorded tier and the log
+    # The task tier sits on top of the general tier, so --task-lang-steer implies --general-lang-steer.
+    # Resolved ONCE here rather than at each use, so the steer call, the recorded tier and the log
     # line can never disagree about which arm ran.
-    args.general_rules = bool(getattr(args, "general_rules", False) or args.task_rules)
+    args.general_lang_steer = bool(getattr(args, "general_lang_steer", False) or args.task_lang_steer)
     if getattr(args, "last_milestone_retry", None) is None:
-        args.last_milestone_retry = args.general_rules
+        args.last_milestone_retry = args.general_lang_steer
     """Connect to both servers, roll every requested episode, write the index part.
 
     Shared by ``main()`` and by plan-variant scripts: a variant only has to set ``args.plan_fn``
@@ -2163,8 +2158,8 @@ def run_sweep(args, *, method_suffix: str = "") -> None:
         args.method = _short_method_name(args.s1_dir, args.s2_dir, method_suffix)
         print(f"derived --method: {args.method}", flush=True)
     out_root = Path(args.out_root)
-    run_rule_config = _write_run_rule_config(out_root, args.method, args)
-    print(f"rule config: {run_rule_config['tier']}  ({out_root / args.method / 'rule_config.json'})",
+    run_lang_steer_config = _write_run_lang_steer_config(out_root, args.method, args)
+    print(f"steer config: {run_lang_steer_config['tier']}  ({out_root / args.method / 'lang_steer_config.json'})",
           flush=True)
     norm_stats = None
     if args.norm_stats and args.norm_stats.exists():
@@ -2190,7 +2185,7 @@ def run_sweep(args, *, method_suffix: str = "") -> None:
     ok = sum(1 for r in results if r.get("episode_success"))
     idx = {
         "eval_kind": "combine", "method": args.method, "n_episodes": len(results),
-        "rule_config": run_rule_config,
+        "lang_steer_config": run_lang_steer_config,
         "n_success": ok,
         "success_rate": (ok / len(results)) if results else None,
         "episodes": [{k: r.get(k) for k in

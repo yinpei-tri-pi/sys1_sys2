@@ -1,6 +1,10 @@
-"""Browse a results dir written by sim/official_eval.py: per-task success, every episode's rollout
-(played turn by turn) and every System2 turn (what it saw, its thought, judgement, subgoal, plan
-update, language-steering interventions) next to the System1 segment it produced.
+"""Browse a results dir written by sim/official_eval.py or sim/target_eval.py.
+
+  /          overview: per-task success, each episode's rollout played turn by turn with System2's
+             subgoal, thought, judgement, plan and language-steering interventions.
+  /rollout   rollout inspector (the openpi / RoboAnnotator "combine" view): one System2 turn at a
+             time beside the System1 segment it produced -- step-synced video, progress / action /
+             gripper curves, predicted action chunks, why the segment stopped, the clip System2 saw.
 
     sim/.venv/bin/python viewer/server.py --log-dir results/<run> [--port 8090] [--host 127.0.0.1]
 
@@ -18,6 +22,7 @@ import re
 import urllib.parse
 
 HERE = Path(__file__).resolve().parent
+
 SIM_FPS = 20
 
 try:  # task -> leaderboard split; optional so the viewer also runs outside the sim env
@@ -91,7 +96,7 @@ class Results:
                     "steps": d.get("n_env_steps"),
                     "horizon": d.get("max_official_steps"),
                     "turns": d.get("n_turns"),
-                    "rules": d.get("n_rule_interventions"),
+                    "steers": d.get("n_lang_steer_interventions"),
                     "seconds": d.get("seconds"),
                 })
         for split_dir in sorted((self.root / "evals").glob("*")):
@@ -107,6 +112,34 @@ class Results:
         return {"log_dir": str(self.root), "group_size": GROUP_SIZE,
                 "tasks": sorted(tasks.values(), key=lambda t: (t["group"], t["task"]))}
 
+    def combine_methods(self) -> list[dict]:
+        out = []
+        for md in sorted(p for p in (self.root / "episodes").glob("*") if p.is_dir()):
+            cfg = _read_json(md / "lang_steer_config.json")
+            eps = self.combine_episodes(md.name)
+            out.append({"method": md.name, "n_episodes": len(eps),
+                        "n_success": sum(bool(e.get("episode_success")) for e in eps),
+                        "lang_steer_config": cfg})
+        return out
+
+    def combine_episodes(self, method: str) -> list[dict]:
+        md = self.root / "episodes" / method
+        if method in ("", ".", "..") or not md.is_dir():
+            return []
+        eps = []
+        for ep_json in sorted(md.glob("*/episode.json")):
+            d = self._episode_doc(ep_json)
+            if not d:
+                continue
+            task = d.get("task_name") or ep_json.parent.name.split("__")[0]
+            m = re.search(r"episode_(\d+)", ep_json.parent.name)
+            eps.append({"dir": ep_json.parent.name, "episode_id": d.get("episode_id"), "task_name": task,
+                        "episode_index": int(m.group(1)) if m else None,
+                        "task_split": GROUP_OF.get(task, "other"),
+                        "episode_success": d.get("episode_success"), "n_turns": d.get("n_turns"),
+                        "termination": d.get("termination"), "error": d.get("error")})
+        return eps
+
     def episode(self, key: str) -> dict | None:
         ep_dir = (self.root / "episodes" / key).resolve()
         if self.root not in ep_dir.parents or not (ep_dir / "episode.json").exists():
@@ -118,8 +151,8 @@ class Results:
         turns, step = [], 0
         for td in sorted(p for p in ep_dir.glob("turn*") if (p / "turn.json").exists()):
             t = _read_json(td / "turn.json") or {}
-            s2, s1, rules = t.get("s2") or {}, t.get("s1") or {}, t.get("rules") or {}
-            eff = rules.get("effective") or {}
+            s2, s1, steers = t.get("s2") or {}, t.get("s1") or {}, t.get("steers") or {}
+            eff = steers.get("effective") or {}
             media = s2.get("media") or {}
             n = int(s1.get("n_steps") or 0)
             video = td / "s1_rollout_raw.mp4"
@@ -133,13 +166,13 @@ class Results:
                 "estimated_step": eff.get("estimated_step", s2.get("estimated_step")),
                 "plan_update": s2.get("plan_update"),
                 "plan_after": t.get("plan_after"),
-                "held_by_rule": s2.get("held_by_rule"),
+                "held_by_steer": s2.get("held_by_steer"),
                 "privileged": s2.get("privileged"),
                 "latency_s": s2.get("latency_s"),
                 "response_raw": s2.get("response_raw"),
                 "s2_input_video": self._media(ep_dir, (media.get("video") or {}).get("path")),
                 "s2_input_image": self._media(ep_dir, (media.get("image") or {}).get("path")),
-                "interventions": rules.get("interventions") or [],
+                "interventions": steers.get("interventions") or [],
                 "s1_prompt": (s1.get("s1_prompts") or [None])[0],
                 "s1_steps": n,
                 "s1_stop": s1.get("stop_reason"),
@@ -156,8 +189,8 @@ class Results:
             "instruction": d.get("instruction"), "success": bool(d.get("episode_success")),
             "termination": d.get("termination"), "error": d.get("error"),
             "steps": d.get("n_env_steps"), "horizon": d.get("max_official_steps"),
-            "n_turns": d.get("n_turns"), "seconds": d.get("seconds"), "rule_tier": d.get("rule_tier"),
-            "n_rule_interventions": d.get("n_rule_interventions"),
+            "n_turns": d.get("n_turns"), "seconds": d.get("seconds"), "lang_steer_tier": d.get("lang_steer_tier"),
+            "n_lang_steer_interventions": d.get("n_lang_steer_interventions"),
             "reset_mode": (d.get("config") or {}).get("reset_mode"),
             "plan": {"thought": plan.get("thought"), "plan": plan.get("plan"), "scene": scene},
             "final_plan": d.get("final_plan"), "sim_fps": SIM_FPS, "turns": turns,
@@ -219,6 +252,10 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         if url.path in ("/", "/index.html"):
             return self._file(HERE / "index.html")
+        if url.path in ("/rollout", "/rollout.html"):
+            return self._file(HERE / "rollout.html")
+        if url.path.startswith("/api/combine/"):
+            return self._combine(urllib.parse.unquote(url.path[len("/api/combine/"):]).split("/"))
         if url.path == "/api/summary":
             return self._json(self.results.summary())
         if url.path == "/api/episode":
@@ -231,6 +268,34 @@ class Handler(BaseHTTPRequestHandler):
             if self.results.root in path.parents and path.is_file():
                 return self._file(path)
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    # ---- rollout inspector API (same routes as openpi subtask_eval_gui.py /api/combine/*) ----------
+    def _combine(self, parts: list[str]):
+        root = self.results.root / "episodes"
+        nf = lambda: self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)  # noqa: E731
+        if any(p in ("", ".", "..") for p in parts[1:]):
+            return nf()
+        kind, rest = parts[0], parts[1:]
+        if kind == "methods" and not rest:
+            return self._json(self.results.combine_methods())
+        if kind == "episodes" and len(rest) == 1:
+            return self._json(self.results.combine_episodes(rest[0]))
+        if kind == "episode" and len(rest) == 2:
+            doc = _read_json(root / rest[0] / rest[1] / "episode.json")
+            return self._json(doc) if doc is not None else nf()
+        if kind == "turn" and len(rest) == 3:
+            base = root / rest[0] / rest[1] / rest[2]
+            out = {key: _read_json(base / name) for name, key in (
+                ("turn.json", "turn"), ("s1_steps.json", "s1_steps"), ("plan.json", "plan"),
+                ("memory/memory.json", "memory"), ("memory/recipe.json", "recipe"))
+                if (base / name).exists()}
+            return self._json(out) if out else nf()
+        if kind == "media" and len(rest) >= 4:
+            base = (root / rest[0] / rest[1] / rest[2]).resolve()
+            path = (base / "/".join(rest[3:])).resolve()
+            if base in path.parents and path.is_file():
+                return self._file(path)
+        return nf()
 
 
 def main():

@@ -248,11 +248,11 @@ class StopTracker:
         return (not self.gripper_flipped_recently()) or self.gripper_settled()
 
     def should_stop(self) -> bool:
-        """Post-step rule: progress at threshold AND arm quiescent AND gripper settled-if-flipped."""
+        """Post-step criterion: progress at threshold AND arm quiescent AND gripper settled-if-flipped."""
         return self.progress_done() and self.quiescent() and self._gripper_ok()
 
     def should_stop_lookahead(self, chunk_sim) -> bool:
-        """Pre-step rule: stop WITHOUT executing, using the model's own next actions.
+        """Pre-step criterion: stop WITHOUT executing, using the model's own next actions.
 
         Fires when ALL hold:
           * progress (for the step about to run) is at threshold,

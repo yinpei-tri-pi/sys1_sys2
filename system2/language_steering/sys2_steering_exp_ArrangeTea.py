@@ -2,13 +2,13 @@
 
 The recipe already asks the planner to put the kettle well inside the tray, but qwen3vl's execution
 subgoal normally collapses that location back to merely "the tray". The kettle is then often left
-too close to the outer edge. This task-only rule restores the more precise destination in the text
+too close to the outer edge. This task-only steer restores the more precise destination in the text
 System1 actually receives.
 
 This is deliberately a subgoal experiment, not a plan rewrite: it changes only kettle carry turns,
 including their continuation variants, and does not touch the following lower/release action.
 ``SYS2_ARRANGE_TEA_INNER_TRAY=0`` disables this one experiment;
-``SYS2_RULES_NO_EXP=1`` disables the complete experimental layer.
+``SYS2_LANG_STEER_NO_EXP=1`` disables the complete experimental layer.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ _KETTLE_TO_TRAY_RE = re.compile(
 )
 
 
-def _rule_arrangetea_kettle_inner_tray(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_arrangetea_kettle_inner_tray(task: str, plan: str, subgoal: str, est, state) -> dict:
     """Tell System1 to carry the kettle to the tray's inner side."""
     if task != ARRANGE_TEA or not INNER_TRAY_ENABLED:
         return {}
@@ -45,7 +45,7 @@ def _rule_arrangetea_kettle_inner_tray(task: str, plan: str, subgoal: str, est, 
         "subgoal_detail": revised,
         "interventions": [
             {
-                "rule": "arrangetea_kettle_inner_tray",
+                "steer": "arrangetea_kettle_inner_tray",
                 "kind": "subgoal_override",
                 "detail": "ArrangeTea experiment: target the inner side of the tray so the kettle "
                           "is not left near its outer edge; plan and estimate untouched",
@@ -56,7 +56,7 @@ def _rule_arrangetea_kettle_inner_tray(task: str, plan: str, subgoal: str, est, 
     }
 
 
-EXP_RULES: tuple = (_rule_arrangetea_kettle_inner_tray,)
-EXP_RULE_TASKS: dict[str, tuple[str, ...]] = {
-    "_rule_arrangetea_kettle_inner_tray": (ARRANGE_TEA,),
+EXP_STEERS: tuple = (_steer_arrangetea_kettle_inner_tray,)
+EXP_STEER_TASKS: dict[str, tuple[str, ...]] = {
+    "_steer_arrangetea_kettle_inner_tray": (ARRANGE_TEA,),
 }

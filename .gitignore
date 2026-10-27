@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 logs/
 results/
+s1_ckpt
+s2_ckpt
+.pytest_cache/
+.nfs*
+checkpoints/
