@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Full benchmark on several GPUs: one complete stack (System1 + System2 + simulator) per GPU, each
-# evaluating every N-th task of the list, all writing into ONE --log-dir; summarized at the end.
+# Full benchmark on several GPUs: one complete stack (System1 + System2 + simulator) per GPU. The
+# stacks pull tasks from a shared queue (see --schedule), all write into ONE --log-dir, and the
+# results are summarized at the end.
 #
 #   bash scripts/run_fleet.sh                      # the full benchmark: 50 tasks x 50 trials, every GPU
 #   bash scripts/run_fleet.sh --num-trials 2       # 100-episode pilot

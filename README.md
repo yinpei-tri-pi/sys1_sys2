@@ -33,21 +33,26 @@ About 60 GB of disk: 30 GB System2 image, 10 GB kitchen assets, 22 GB checkpoint
 ```bash
 git clone --recursive <this repo> sys1_sys2 && cd sys1_sys2
 bash scripts/setup.sh                 # System1 env, System2 image, simulator env + kitchen assets
-bash scripts/download_checkpoints.sh  # both checkpoints from the Hugging Face Hub -> checkpoints/
+bash scripts/download_checkpoints.sh  # both checkpoints from the Hugging Face Hub, see Checkpoints
 ```
 
 `setup.sh` creates `system1/.venv` (pinned by `system1/uv.lock`), builds the Docker image
 `sys1-sys2/system2-vllm:0.19.1` and creates `sim/.venv` with RoboCasa and robosuite from the
-submodules. If the checkpoint repos are private, set `HF_TOKEN` before downloading.
+submodules.
 
-| | Hugging Face repo | Local path (default for every script) |
-| --- | --- | --- |
-| System1 | [`yinpei-tri-pi/robocasa-system1-pi05-progact`](https://huggingface.co/yinpei-tri-pi/robocasa-system1-pi05-progact), 12 GB | `checkpoints/system1/f0717-...-progact__.../269999` |
-| System2 | [`yinpei-tri-pi/robocasa-system2-qwen3vl-4b`](https://huggingface.co/yinpei-tri-pi/robocasa-system2-qwen3vl-4b), 10 GB | `checkpoints/system2/system2-full-0804-...-ep3/checkpoint-17124` |
+## Checkpoints
 
-The exact paths are in `scripts/checkpoints.env`. Other checkpoints work with `--s1-ckpt` and
-`--s2-ckpt`. System1 takes a step dir with `params/`, `assets/robocasa_system1/norm_stats.json` and
-`config.json`. System2 takes a merged Hugging Face checkpoint.
+The evaluated checkpoints are public on the Hugging Face Hub; no token is needed.
+
+| | Hugging Face repo | Size | Local path (default for every script) |
+| --- | --- | --- | --- |
+| System1 | [`yinpei-tri-pi/robocasa-system1-pi05-progact`](https://huggingface.co/yinpei-tri-pi/robocasa-system1-pi05-progact) | 12 GB | `checkpoints/system1/f0717-...-progact__.../269999` |
+| System2 | [`yinpei-tri-pi/robocasa-system2-qwen3vl-4b`](https://huggingface.co/yinpei-tri-pi/robocasa-system2-qwen3vl-4b) | 10 GB | `checkpoints/system2/system2-full-0804-...-ep3/checkpoint-17124` |
+
+`bash scripts/download_checkpoints.sh` downloads both into those paths. The exact paths are in
+`scripts/checkpoints.env`. Other checkpoints work with `--s1-ckpt` and `--s2-ckpt`. System1 takes a
+step dir with `params/`, `assets/robocasa_system1/norm_stats.json` and `config.json`. System2 takes a
+merged Hugging Face checkpoint.
 
 ## Run
 
@@ -74,6 +79,33 @@ on one env, as the official client does. With 80 GB GPUs the default memory spli
   `sim/.venv/bin/python sim/official_eval.py --help`.
 - A cold vLLM start can take several minutes. Docker setups that reject `--gpus` need
   `--docker-gpu-mode runtime`.
+
+### Full 50-task evaluation on several GPUs
+
+The leaderboard run is 50 tasks x 50 trials (2500 episodes). On one machine with 8 GPUs, one stack per
+GPU, with every default spelled out:
+
+```bash
+tmux new -s fulleval        # or setsid nohup ... &: the run takes about half a day
+bash scripts/run_fleet.sh \
+  --s1-ckpt checkpoints/system1/f0717-270k-bs512-progact__progact_granfine_verbsimp_noexec/269999 \
+  --s2-ckpt checkpoints/system2/system2-full-0804-qwen3vl-4b-gb192-full-vitfull-lr1e5-vitlr2e6-alignerlr1e5-zero2-2n-ep3/checkpoint-17124 \
+  --gpus 0,1,2,3,4,5,6,7 --s1-mem-frac 0.32 --s2-mem-frac 0.42 \
+  --protocol official --tasks all --num-trials 50 --split pretrain --seed 7 \
+  --log-dir results/full_official
+```
+
+While it runs, and after it ends:
+
+```bash
+sim/.venv/bin/python sim/progress.py --log-dir results/full_official    # episodes done, elapsed, ETA
+sim/.venv/bin/python sim/summarize.py --log-dir results/full_official   # per-task and per-split success
+cat results/full_official/timing.json                                   # start, end, wall time
+```
+
+On GPUs smaller than 80 GB, run System2 on its own cards: `--gpus 0,1,2,3 --s2-gpus 4,5,6,7` gives four
+stacks, System1 and the simulator on GPUs 0-3 and System2 on GPUs 4-7. On 8 x A100-80GB the
+100-episode pilot (`--num-trials 2`) took 35 minutes, which puts the full run at about 13 hours.
 
 One stack on two GPUs, or the servers on their own:
 
