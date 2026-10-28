@@ -1,9 +1,10 @@
 """System2 (Qwen3.5-4B planner) client for the COMBINED System2+System1 eval.
 
 Talks to a vLLM OpenAI-protocol server serving the trained System2 checkpoint and reproduces the
-EXACT prompt shapes the model was trained on. Every prompt string here was lifted verbatim from
-the training/eval shards (``system2_target_0804``); do not "improve" the wording — the model was
-supervised on these exact templates and paraphrasing them is an off-distribution change.
+EXACT prompt shapes the model was trained on. Every prompt string here is verbatim from the System2
+training shards (``system2_full_0804``, built from the RoboCasa365 pretrain split with Gemini-labelled
+dense subgoals); do not "improve" the wording — the model was supervised on these exact templates
+and paraphrasing them is an off-distribution change.
 
 Three modes are used by the closed loop (a 4th, summary/recipe, is only needed for the
 "with memory" plan variant and is not used by the cold-plan loop):
@@ -116,7 +117,7 @@ JUDGES = ("task_begin", "subgoal_complete", "subgoal_incomplete", "subgoal_faile
 
 
 # ---------------------------------------------------------------------------
-# Prompts — VERBATIM from system2_target_0804 shards. Do not reword.
+# Prompts — VERBATIM from the system2_full_0804 training shards. Do not reword.
 
 SYS_PLAN_COLD = (
     "You are the high-level planner for a single Franka Panda arm on a mobile base in a home "
