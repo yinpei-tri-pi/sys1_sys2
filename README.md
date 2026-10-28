@@ -119,7 +119,8 @@ bash scripts/serve_system2.sh --gpu 1 --port 8100
 episodes per task (1500) that the training repo reported, restoring each episode's scene and initial
 state. It needs the target human datasets (`sim/.venv/bin/python -m robocasa.scripts.download_datasets
 --split target --source human`) and `--dataset-root <datasets>/v1.0/target`. It is not the leaderboard
-number.
+number. Neither model was trained on target-split data:
+System1 and System2 use only the pretrain split, with dense subgoals labelled by Gemini.
 
 ## Outputs and viewer
 

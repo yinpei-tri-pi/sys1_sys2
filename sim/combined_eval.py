@@ -33,9 +33,10 @@ parsed tag, the exact media the model saw, the S1 prompt, per-step actions/progr
 anchor image, the raw rollout video and the compacted 4-fps clip. See ``turn.json`` /
 ``episode.json`` below and the /combine GUI.
 
-NO ANNOTATIONS ARE READ. The annotation files were the TRAINING data for System1 and System2;
-at rollout time System2 supplies the subgoals and System1 the actions. Everything this script
-needs comes from the raw LeRobot dataset and the env itself:
+NO ANNOTATIONS ARE READ. System1 and System2 were trained on the RoboCasa365 pretrain split, with
+dense subgoals labelled by Gemini; no annotation is used at rollout time, where System2 supplies the
+subgoals and System1 the actions. Everything this script needs comes from the raw LeRobot episode
+(or, for the leaderboard protocol, the gym env's reset) and the env itself:
   * ``reset_to(states[0])``           -- the episode's own first frame (recorded scene + start),
   * ``ep_meta['lang']``               -- the task goal handed to System2's planner AND used as
                                          System1's "Task:" prefix. ``--goal-json {task: goal}``
@@ -1153,8 +1154,9 @@ def eval_episode(episode_dir: Path, s1_client, s2_client: S2C.Sys2Client, args,
 
     ``episode_dir`` is a raw LeRobot dataset dir and ``args`` carries the episode index. NO
     annotation files are read: the task goal comes from the dataset's own ``ep_meta['lang']`` and
-    success from the env's ``_check_success()``. Annotations were training data for System1 and
-    System2; at rollout time System2 supplies the subgoals and System1 the actions.
+    success from the env's ``_check_success()``. System1 and System2 were trained on the pretrain
+    split with Gemini-labelled dense subgoals; at rollout time System2 supplies the subgoals and
+    System1 the actions.
     """
     t0 = time.time()
     ld = Path(episode_dir)
