@@ -328,7 +328,7 @@ def decimate_only(
     }
 
 
-# Static-frame threshold for CLIP CONDENSING. Deliberately 10x STRICTER than the stop rule's
+# Static-frame threshold for CLIP CONDENSING. Deliberately 10x STRICTER than the stop criterion's
 # quiescence eps (0.02): that one asks "has motion effectively ceased?" (a decision), while this
 # one asks "is this frame visually redundant?" (a filter). At 0.02 a slow-but-real approach would
 # be discarded as static; 0.002 drops only near-zero motion, so genuine slow movement survives.
@@ -371,7 +371,7 @@ def compact_static_frames(
 
     ``motion[i]`` is the per-step commanded-motion norm from
     ``stop_criterion.action_eef_base_norm`` — the SAME quantity and ``eps`` the quiescence half of
-    the stop rule uses, so "static" means exactly what it means there. Order of operations:
+    the stop criterion uses, so "static" means exactly what it means there. Order of operations:
 
       1. keep frames whose motion >= eps (genuine movement),
       2. ALWAYS keep the first and last frame (the before/after the model reasons over),

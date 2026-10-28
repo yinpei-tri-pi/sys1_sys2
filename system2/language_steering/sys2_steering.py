@@ -1,11 +1,11 @@
-"""System2 LANGUAGE STEERING: hardcoded rules that revise System2's output before System1 executes it.
+"""System2 LANGUAGE STEERING: hardcoded steers that revise System2's output before System1 executes it.
 
 WHY THIS IS A SEPARATE FILE. These are deliberate, task-specific overrides of a learned planner
 -- not model behaviour and not a bug fix. Keeping them out of ``combined_eval.py`` means:
-  * the unmodified pipeline stays readable and is what runs when no rule matches;
+  * the unmodified pipeline stays readable and is what runs when no steer matches;
   * every intervention is recorded, so a result is never quietly attributable to a hidden hack
-    (see ``scripts/report_rule_interventions.py``);
-  * a rule can be added/removed without touching the rollout loop.
+    (see ``scripts/report_lang_steer_interventions.py``);
+  * a steer can be added/removed without touching the rollout loop.
 
 Runs on the EXEC path only, once per turn, AFTER ``apply_plan_update`` has merged System2's
 ``<plan_update>`` into the running checklist. Four kinds of revision:
@@ -19,13 +19,13 @@ Runs on the EXEC path only, once per turn, AFTER ``apply_plan_update`` has merge
 PLAN REVISIONS PERSIST. The returned plan replaces the caller's running checklist, so it becomes
 the context System2 conditions on for every later turn -- exactly like a model-authored
 ``plan_update``. Two consequences worth stating:
-  * rules must be IDEMPOTENT: they are re-evaluated every turn against the latest plan, and a
+  * steers must be IDEMPOTENT: they are re-evaluated every turn against the latest plan, and a
     revision already present must be a no-op (verified below -- 5/20 PickPlaceDrawerToCounter
     plans already contain the base-alignment step System2 wrote itself).
-  * a rule is therefore self-healing: if System2's next ``<plan_update>`` drops the inserted step,
-    the rule re-inserts it on the following turn.
+  * a steer is therefore self-healing: if System2's next ``<plan_update>`` drops the inserted step,
+    the steer re-inserts it on the following turn.
 
-Every rule here was checked against the recorded s1-progact270k rollouts before being written --
+Every steer here was checked against the recorded s1-progact270k rollouts before being written --
 the match strings and milestone ids are the ones the model actually emits, not guesses.
 """
 
@@ -79,7 +79,7 @@ def _render(blocks: list[dict]) -> str:
 def current_fine_id(plan: str) -> str | None:
     """The fine step System2 is working on: first '~', else first ' ' (todo). None if all done.
 
-    Used to key rules on a milestone POSITION (e.g. "M2.1") rather than on subgoal wording, which
+    Used to key steers on a milestone POSITION (e.g. "M2.1") rather than on subgoal wording, which
     varies run to run (M2.1 was phrased 6 different ways across 20 CoffeeSetupMug episodes).
     """
     b = _blocks(plan)
@@ -97,7 +97,7 @@ def current_fine_id(plan: str) -> str | None:
 def current_milestone_text(plan: str) -> str:
     """Text of the milestone that owns the current fine step ("" if none).
 
-    Lets a rule key on the PHASE of a composite task rather than the task name -- e.g. the
+    Lets a steer key on the PHASE of a composite task rather than the task name -- e.g. the
     "turn on the sink faucet" milestone inside RinseSinkBasin is the same physical act as the whole
     of the atomic TurnOnSinkFaucet task.
     """
@@ -114,7 +114,7 @@ def _norm(s: str | None) -> str:
     """Lowercase, strip a leading 'continue to ' / trailing 'again', collapse spaces.
 
     System2 re-issues the same instruction with those affixes when a step is only partway done
-    ("continue to turn on the sink faucet handle"), and a rule keyed on the bare phrasing must
+    ("continue to turn on the sink faucet handle"), and a steer keyed on the bare phrasing must
     still fire.
     """
     t = (s or "").strip().lower().rstrip(".")
@@ -137,15 +137,15 @@ _FINAL_RETRY_RETRACT_RE = re.compile(
 _FINAL_RETRY_CONTINUE_RETRACT_RE = re.compile(
     r"\bcontinue\s+to\b.*\bretract(?:ing)?\b|\bcontinue\s+retracting\b", re.IGNORECASE)
 _FINAL_RETRY_FINISH_TASK_RE = re.compile(r"\bfinish\s+the\s+task\b", re.IGNORECASE)
-# Zero means no rule-local retry cap. The evaluator's selected rollout limit (normally the official
+# Zero means no steer-local retry cap. The evaluator's selected rollout limit (normally the official
 # RoboCasa horizon) remains the outcome-bearing stop; a positive value is useful for controlled
 # ablations and debugging.
 FINAL_MILESTONE_RETRY_MAX = int(os.environ.get(
-    "SYS2_RULES_FINAL_MILESTONE_RETRY_MAX", "0"))
+    "SYS2_LANG_STEER_FINAL_MILESTONE_RETRY_MAX", "0"))
 if FINAL_MILESTONE_RETRY_MAX < 0:
-    raise ValueError("SYS2_RULES_FINAL_MILESTONE_RETRY_MAX must be >= 0 (0 means unlimited)")
+    raise ValueError("SYS2_LANG_STEER_FINAL_MILESTONE_RETRY_MAX must be >= 0 (0 means unlimited)")
 
-# Which tasks have retract steps stripped from the plan. Overridable via SYS2_RULES_STRIP_RETRACT
+# Which tasks have retract steps stripped from the plan. Overridable via SYS2_LANG_STEER_STRIP_RETRACT
 # (comma list, or empty to disable) so the strip can be scoped per run WITHOUT editing this file --
 # MEASURED, one variable at a time, on the same 8 TurnOnMicrowave episodes:
 #     keep retract, no rephrase    4/8   mean 4.0 turns
@@ -159,19 +159,19 @@ if FINAL_MILESTONE_RETRY_MAX < 0:
 # OpenStandMixerHead keeps the strip (3/7 -> 5/7): the push alone completes that task.
 _STRIP_RETRACT_TASKS = tuple(
     t.strip() for t in os.environ.get(
-        "SYS2_RULES_STRIP_RETRACT", "OpenStandMixerHead").split(",") if t.strip())
+        "SYS2_LANG_STEER_STRIP_RETRACT", "OpenStandMixerHead").split(",") if t.strip())
 
-# Max consecutive turns a rule may skip System1. NO RULE CURRENTLY SKIPS: the mechanism froze the
+# Max consecutive turns a steer may skip System1. NO STEER CURRENTLY SKIPS: the mechanism froze the
 # env (success is polled only on executed steps), so retract handling moved to plan surgery
-# instead -- see _rule_strip_retract_plan. The plumbing is kept because `skip_s1` is a generic
-# capability, but a future skipping rule must account for the frozen-env effect.
+# instead -- see _steer_strip_retract_plan. The plumbing is kept because `skip_s1` is a generic
+# capability, but a future skipping steer must account for the frozen-env effect.
 MAX_CONSEC_SKIPS = 2
 
 # Max consecutive turns System1 may be handed the SAME subgoal before the repeat cap advances the
-# plan (see _rule_repeat_cap). Env-overridable so the threshold can be swept without a code edit.
-MAX_SAME_SUBGOAL = int(os.environ.get("SYS2_RULES_MAX_SAME_SUBGOAL", "3"))
+# plan (see _steer_repeat_cap). Env-overridable so the threshold can be swept without a code edit.
+MAX_SAME_SUBGOAL = int(os.environ.get("SYS2_LANG_STEER_MAX_SAME_SUBGOAL", "3"))
 # Tighter cap for a pure "reach to/for X": positioning either converges quickly or not at all.
-REACH_SAME_SUBGOAL = int(os.environ.get("SYS2_RULES_MAX_SAME_REACH", "2"))
+REACH_SAME_SUBGOAL = int(os.environ.get("SYS2_LANG_STEER_MAX_SAME_REACH", "2"))
 # How many END-OF-PLAN cap declines to tolerate before force-stopping the episode as "max_cap".
 # An episode that trips the cap with nothing left to advance into is effectively dead: measured over
 # the two 1500-episode v2 sweeps, such episodes succeed 1.5-2.3% of the time against ~65% for episodes
@@ -181,7 +181,7 @@ REACH_SAME_SUBGOAL = int(os.environ.get("SYS2_RULES_MAX_SAME_REACH", "2"))
 # needed a 7th attempt. Tightening to 3 declines / 5 attempts would cost qwen3vl 7 wins (0.47%) by
 # additionally losing TurnOnSinkFaucet ep01 and WashFruitColander ep10, and stopping at the FIRST
 # decline would cost 0.93% / 1.80%. Six is the setting the session owner chose.
-MAX_CAP_DECLINES = int(os.environ.get("SYS2_RULES_MAX_CAP_DECLINES", "4"))
+MAX_CAP_DECLINES = int(os.environ.get("SYS2_LANG_STEER_MAX_CAP_DECLINES", "4"))
 # A RETRACT terminal step gets NO declines at all: it stops the moment the cap is exceeded, i.e. 3
 # executed attempts rather than 5. A retract either latches immediately or never -- measured over the
 # two 1500-episode sweeps, retract-terminal loops beyond 3 repeats number 240 episodes on qwen35 and 82
@@ -189,18 +189,18 @@ MAX_CAP_DECLINES = int(os.environ.get("SYS2_RULES_MAX_CAP_DECLINES", "4"))
 # against 505/549 episodes at a single retract turn yielding 282/316 wins. So cutting here stops 203 and
 # 82 more episodes for 0.07% of the run apiece. Tasks most affected: PrepareCoffee, SeparateFreezerRack,
 # GarnishPancake, PanTransfer, CategorizeCondiments, ScrubCuttingBoard, StoreLeftoversInBowl.
-MAX_CAP_DECLINES_RETRACT = int(os.environ.get("SYS2_RULES_MAX_CAP_DECLINES_RETRACT", "0"))
+MAX_CAP_DECLINES_RETRACT = int(os.environ.get("SYS2_LANG_STEER_MAX_CAP_DECLINES_RETRACT", "0"))
 # _norm has already stripped a leading "continue to", so this matches the re-issues too.
 _RETRACT_TERMINAL_RE = re.compile(r"^retract\b")
 # OpenStandMixerHead est_length floor. est_length is a POLICY CONDITIONING tag (rendered into
-# System1's prompt as "Estimated Length"), not only a budget multiplier -- see _rule_mixer_est_floor.
-MIXER_EST_FLOOR = int(os.environ.get("SYS2_RULES_MIXER_EST_FLOOR", "75"))
+# System1's prompt as "Estimated Length"), not only a budget multiplier -- see _steer_mixer_est_floor.
+MIXER_EST_FLOOR = int(os.environ.get("SYS2_LANG_STEER_MIXER_EST_FLOOR", "75"))
 # est_length BUCKET LADDER, as used by the training data. A bump means "the next bucket up".
 EST_BUCKETS = (50, 75, 100, 125, 150, 175, 200, 250, 300, 350, 400, 500,
                600, 800, 1000, 1300)
 # At and above this, est is left alone: the bump is a precision aid for short/medium motions, and
 # the rungs above 500 are large jumps on spans that are already long.
-EST_BUMP_CEILING = int(os.environ.get("SYS2_RULES_EST_BUMP_CEILING", "500"))
+EST_BUMP_CEILING = int(os.environ.get("SYS2_LANG_STEER_EST_BUMP_CEILING", "500"))
 # Historical scope of the bucket bump, measured one variable at a time (v3 -> v4, same 20 episodes
 # per task, bump the only change):
 #     TurnOnMicrowave   11 -> 15   (+4)   press a button
@@ -226,10 +226,10 @@ EST_BUMP_CEILING = int(os.environ.get("SYS2_RULES_EST_BUMP_CEILING", "500"))
 # addresses. The composite sink/microwave tasks are long and max_turns-prone in the same way, so the
 # extension was judged unsupported. Recoverable from 61679dd if it is worth measuring later.
 #
-# The rule is now scoped to TurnOnMicrowave alone. TurnOnSinkFaucet is covered by the semantic
+# The steer is now scoped to TurnOnMicrowave alone. TurnOnSinkFaucet is covered by the semantic
 # sink_faucet_est text gate below, including composite tasks that contain the same operation, while
-# GetToastedBread has dedicated wait and slot-positioning rules. Keeping those three mechanisms
-# separate avoids stacking two estimate rules on the same turn and makes their attribution clear.
+# GetToastedBread has dedicated wait and slot-positioning steers. Keeping those three mechanisms
+# separate avoids stacking two estimate steers on the same turn and makes their attribution clear.
 
 
 def bump_est(est):
@@ -254,23 +254,23 @@ _REACH_RE = re.compile(r"^(reach\s+(to|for)|(lift\s+and\s+)?carry)\b")
 
 
 # --------------------------------------------------------------------------------------------
-# the rules
+# the steers
 
 
 # Drawer milestone shape: a "reach ... drawer handle" step followed by a "pull/open ... drawer"
-# step. Matching the SUBGOAL TEXT rather than a task name generalises the rule from the atomic
+# step. Matching the SUBGOAL TEXT rather than a task name generalises the steer from the atomic
 # PickPlaceDrawerToCounter to every composite task that opens a drawer (measured drawer-subgoal
 # turns: SetUpCuttingStation 172, DeliverStraw 116, OpenDrawer 78, CuttingToolSelection 12).
 _DRAWER_REACH_RE = re.compile(r"(reach|move|extend).*drawer|drawer handle")
 _DRAWER_PULL_RE = re.compile(r"(pull|open|slide).*drawer|drawer.*(open|out)")
-# Already-has-base-alignment guard. MUST cover the model's own phrasings or the rule would insert a
+# Already-has-base-alignment guard. MUST cover the model's own phrasings or the steer would insert a
 # duplicate: it writes "reposition the base to face the drawer" (53x) and "adjust the base to face
 # the drawer" (51x) as well as "reposition the base to align with the drawer" (19x).
 _BASE_ALIGN_RE = re.compile(r"reposition|align|adjust|face the|orient")
 BASE_ALIGN_TEXT = "reposition the base to align with the drawer"
 DRAWER_ALIGN_EST_FLOOR = 75
 
-# Which tasks get the base-alignment insert. SCOPED to the atomic task by request: the rule was
+# Which tasks get the base-alignment insert. SCOPED to the atomic task by request: the steer was
 # briefly gated on subgoal text alone, which would also have fired on every composite task that
 # opens a drawer (SetUpCuttingStation 172 drawer-subgoal turns, DeliverStraw 116, OpenDrawer 78,
 # CuttingToolSelection 12). Its 1/6 -> 6/6 result was measured ONLY on PickPlaceDrawerToCounter,
@@ -278,19 +278,19 @@ DRAWER_ALIGN_EST_FLOOR = 75
 # once there is evidence for it.
 _DRAWER_ALIGN_TASKS = tuple(
     t.strip() for t in os.environ.get(
-        "SYS2_RULES_DRAWER_ALIGN_TASKS", "PickPlaceDrawerToCounter").split(",") if t.strip())
+        "SYS2_LANG_STEER_DRAWER_ALIGN_TASKS", "PickPlaceDrawerToCounter").split(",") if t.strip())
 
 
-def _rule_drawer_base_align(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_drawer_base_align(task: str, plan: str, subgoal: str, est, state) -> dict:
     """PickPlaceDrawerToCounter (see _DRAWER_ALIGN_TASKS): guarantee a base-alignment step in front
     of a reach->pull drawer milestone.
 
     Observed there: 15/20 episodes planned the drawer milestone as exactly two fine steps (reach
     handle -> pull open) and the robot reached from a pose the drawer was not aligned to; the other
     5 had System2 insert a base-alignment step itself. Forcing that step took the previously-failing
-    episodes from 1/6 (rules-off control) to 6/6 -- the strongest single effect measured.
+    episodes from 1/6 (lang-steer-off control) to 6/6 -- the strongest single effect measured.
 
-    The milestone is located by SHAPE rather than assumed to be M1, so the rule still works if the
+    The milestone is located by SHAPE rather than assumed to be M1, so the steer still works if the
     planner numbers the drawer milestone differently; but the TASK gate is deliberate, because the
     6/6 result was measured on this task alone.
 
@@ -324,29 +324,29 @@ def _rule_drawer_base_align(task: str, plan: str, subgoal: str, est, state) -> d
                       "text": BASE_ALIGN_TEXT},
                      {"mark": " ", "fid": f"{mid}.2", "text": b["fine"][0]["text"]},
                      {"mark": " ", "fid": f"{mid}.3", "text": b["fine"][1]["text"]}]
-        iv = [{"rule": "drawer_base_align", "kind": "plan_revised",
+        iv = [{"steer": "drawer_base_align", "kind": "plan_revised",
                "detail": f"inserted {mid}.1 base alignment; {mid} 2 fine steps -> 3",
                "before": old_fine,
                "after": [f"{f['fid']}: {f['text']}" for f in b["fine"]]}]
         out = {"plan": _render(blocks), "interventions": iv}
         if displaced_first:
             # Execute the inserted step NOW: letting System2's "reach to the drawer handle" run
-            # first is exactly the ordering this rule exists to prevent. The detail is synced here,
-            # by the rule that changed the ACTION (a stale detail would still describe reaching).
+            # first is exactly the ordering this steer exists to prevent. The detail is synced here,
+            # by the steer that changed the ACTION (a stale detail would still describe reaching).
             out["subgoal"] = BASE_ALIGN_TEXT
             out["subgoal_detail"] = BASE_ALIGN_TEXT
-            iv.append({"rule": "drawer_base_align", "kind": "subgoal_override",
+            iv.append({"steer": "drawer_base_align", "kind": "subgoal_override",
                        "detail": "execute the inserted base-alignment step before reaching",
                        "before": subgoal, "after": BASE_ALIGN_TEXT})
         return out
     return {}
 
 
-def _rule_drawer_base_align_est(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_drawer_base_align_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     """PickPlaceDrawerToCounter: floor the M1.1 base-alignment step at est 75.
 
-    Kept separate from ``_rule_drawer_base_align`` so it covers both sources of the step: a
-    checklist where System2 authored M1.1 itself, and the M1.1 inserted by that rule immediately
+    Kept separate from ``_steer_drawer_base_align`` so it covers both sources of the step: a
+    checklist where System2 authored M1.1 itself, and the M1.1 inserted by that steer immediately
     before this one runs.  Position plus alignment wording prevents an unrelated M1.1 from being
     raised.
     """
@@ -360,7 +360,7 @@ def _rule_drawer_base_align_est(task: str, plan: str, subgoal: str, est, state) 
     return {
         "est_proposal": DRAWER_ALIGN_EST_FLOOR,
         "interventions": [{
-            "rule": "drawer_base_align_est",
+            "steer": "drawer_base_align_est",
             "kind": "est_proposed",
             "detail": f"M1.1 base alignment gets an est floor of {DRAWER_ALIGN_EST_FLOOR}",
             "before": est,
@@ -369,7 +369,7 @@ def _rule_drawer_base_align_est(task: str, plan: str, subgoal: str, est, state) 
     }
 
 
-def _rule_strip_retract_plan(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_strip_retract_plan(task: str, plan: str, subgoal: str, est, state) -> dict:
     """_STRIP_RETRACT_TASKS (default: OpenStandMixerHead only): DELETE retract-arm steps from the
     checklist.
 
@@ -390,7 +390,7 @@ def _rule_strip_retract_plan(task: str, plan: str, subgoal: str, est, state) -> 
     executed step -- so skipping FROZE the world and made success undetectable. Measured: 20
     skipped vs 10 executed anyway (a skip cap turned it into a 2-on/1-off cycle), and all four
     TurnOnMicrowave successes latched 10-13 steps INTO an executed retract, i.e. only because the
-    cap defeated the rule.
+    cap defeated the steer.
 
     Deliberately NOT applied to CoffeeSetupMug, which also emits retract subgoals but where the
     retract precedes carrying the mug and is load-bearing.
@@ -416,13 +416,13 @@ def _rule_strip_retract_plan(task: str, plan: str, subgoal: str, est, state) -> 
     if not removed:
         return {}          # nothing to strip -> idempotent no-op on later turns
     return {"plan": _render(blocks),
-            "interventions": [{"rule": "strip_retract_plan", "kind": "plan_revised",
+            "interventions": [{"steer": "strip_retract_plan", "kind": "plan_revised",
                                "detail": "deleted retract-arm step(s) from the checklist so "
                                          "System2 never proposes them",
                                "before": removed, "after": None}]}
 
 
-def _rule_flag_retract_emitted(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_flag_retract_emitted(task: str, plan: str, subgoal: str, est, state) -> dict:
     """Record when System2 asks to retract ANYWAY, despite the step being gone from the plan.
 
     Purely observational -- it does not change behaviour. System2 also reads the video, so it can
@@ -430,10 +430,10 @@ def _rule_flag_retract_emitted(task: str, plan: str, subgoal: str, est, state) -
     how often the plan edit fails to prevent that.
 
     The subgoal is then EXECUTED normally rather than skipped, deliberately: skipping stops the
-    env, and ``_check_success`` only advances on executed steps (see _rule_strip_retract_plan).
+    env, and ``_check_success`` only advances on executed steps (see _steer_strip_retract_plan).
     Executing is also exactly what the baseline did, so it adds no new risk.
     """
-    # Only where the strip actually ran: this rule's whole claim is "System2 asked to retract even
+    # Only where the strip actually ran: this steer's whole claim is "System2 asked to retract even
     # though the step is gone from the plan". On a task that KEEPS its retract step (TurnOnMicrowave,
     # excluded from the strip since 3f6f1f2) that claim is false, and logging it would misreport
     # normal planning as an anomaly.
@@ -441,7 +441,7 @@ def _rule_flag_retract_emitted(task: str, plan: str, subgoal: str, est, state) -
         return {}
     if not _RETRACT_RE.match(_norm(subgoal)):
         return {}
-    return {"interventions": [{"rule": "retract_emitted_despite_plan", "kind": "observed",
+    return {"interventions": [{"steer": "retract_emitted_despite_plan", "kind": "observed",
                                "detail": "System2 proposed a retract with no such step in the "
                                          "plan; executing it (NOT skipping -- a skip would "
                                          "freeze the env and block success detection)",
@@ -449,7 +449,7 @@ def _rule_flag_retract_emitted(task: str, plan: str, subgoal: str, est, state) -
 
 
 # Devices whose PRESS the planner re-issues as "continue to press ...". Matched on the SUBGOAL text.
-# Measured on the no-rules arm plus the four 30/task arms (6000 episodes), counting System2's own
+# Measured on the no-lang-steer arm plus the four 30/task arms (6000 episodes), counting System2's own
 # "press X again" as the evidence that the rewritten form is in-distribution for System1:
 #     the microwave start button   503 continue-to    9 spontaneous "again"  <- the original case
 #     the kettle lever down         53               2
@@ -459,7 +459,7 @@ def _rule_flag_retract_emitted(task: str, plan: str, subgoal: str, est, state) -
 # So the kettle has weak but non-zero support and the coffee machine has NONE; both are included at
 # the session owner's request, on the argument that the wrapper is the thing System1 handles badly and
 # the devices are the same kind of momentary contact. Recorded here so the asymmetry is not forgotten:
-# if this rule is ever measured and only helps on the microwave, the kettle/coffee extension is why.
+# if this steer is ever measured and only helps on the microwave, the kettle/coffee extension is why.
 PRESS_AGAIN_DEVICES = ("microwave", "kettle", "coffee machine")
 # ...and TASK names that identify the device when the subgoal drops it ("press the start button", 17
 # turns, split between PrepareCoffee and TurnOnMicrowave). Safe to widen: the verb gate below still
@@ -474,14 +474,14 @@ PRESS_AGAIN_TASKS = frozenset({
 })
 
 
-def _rule_press_again(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_press_again(task: str, plan: str, subgoal: str, est, state) -> dict:
     """ANY press subgoal on a PRESS_AGAIN device: "continue to press X" -> "press X again".
 
     Was ``microwave_again`` and is recorded under that name in every run before 2026-08-14; the
     mechanism is unchanged, only the device list widened.
 
     Both phrasings occur in the recorded rollouts but are not equally represented: "press the
-    microwave start button again" (9x on the no-rules arm) appears as System2's OWN subgoal, so the
+    microwave start button again" (9x on the no-lang-steer arm) appears as System2's OWN subgoal, so the
     "... again" form is in-distribution for System1, while "continue to ..." is the wrapper System2
     adds when it judges a step only partway done.
 
@@ -511,17 +511,17 @@ def _rule_press_again(task: str, plan: str, subgoal: str, est, state) -> dict:
     if new == subgoal:
         return {}
     # BOTH fields. combined_eval hands System1 `subgoal_detail` when --prompt-source=subgoal_detail
-    # (combined_eval.py: s1_text = sg_detail if ...), so rewriting only `subgoal` makes this rule a
+    # (combined_eval.py: s1_text = sg_detail if ...), so rewriting only `subgoal` makes this steer a
     # no-op under that flag -- silently, since the intervention is still logged. Every other rewriting
-    # rule here sets both.
+    # steer here sets both.
     return {"subgoal": new, "subgoal_detail": new,
-            "interventions": [{"rule": "press_again", "kind": "subgoal_override",
+            "interventions": [{"steer": "press_again", "kind": "subgoal_override",
                                "detail": "'continue to press X' -> 'press X again' (the "
                                          "in-distribution phrasing for System1 on this device)",
                                "before": subgoal, "after": new}]}
 
 
-def _rule_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
     """ALL tasks: after MAX_SAME_SUBGOAL consecutive turns on one subgoal, advance to the next
     fine step instead of re-issuing it.
 
@@ -539,7 +539,7 @@ def _rule_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
     STIR IS EXEMPT. For continuous-effort actions the repetition IS the task, and stirring is the
     clearest case: StirVegetables won 6 times at repeat depths 3,3,3,6,6,7. Capping it would
     destroy those. (Other continuous-effort verbs -- push-door-closed, turn-knob -- also win deep,
-    notably ArrangeTea at depths 9-14; they are NOT exempt here, per the requested rule, so this
+    notably ArrangeTea at depths 9-14; they are NOT exempt here, per the requested steer, so this
     cap is expected to cost those wins. See the note in the module docstring.)
 
     Two thresholds: MAX_SAME_SUBGOAL (3) in general, REACH_SAME_SUBGOAL (2) for a pure
@@ -580,7 +580,7 @@ def _rule_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
     if count <= cap:
         return {}
     if "stir" in n:
-        return {"interventions": [{"rule": "repeat_cap", "kind": "cap_exempt",
+        return {"interventions": [{"steer": "repeat_cap", "kind": "cap_exempt",
                                    "detail": f"repeat #{count} but 'stir' is a continuous-effort "
                                              "action -- the repetition IS the task",
                                    "before": subgoal, "after": subgoal}]}
@@ -590,7 +590,7 @@ def _rule_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
     cur_id = current_fine_id(plan)
     idx = next((i for i, (_, f) in enumerate(flat) if f["fid"] == cur_id), None)
     if idx is None or idx + 1 >= len(flat):
-        # NO NEXT FINE STEP. That used to end the rule, on the reasoning that advancing would strand
+        # NO NEXT FINE STEP. That used to end the steer, on the reasoning that advancing would strand
         # System2 -- but System2 unrolls fine steps ONE MILESTONE AT A TIME, so the last unrolled step
         # is routinely NOT the end of the plan. Measured on the qwen35 v2 sweep: of 2879 such declines,
         # 636 (47 episodes) had a later unfinished MILESTONE sitting right there, and those episodes
@@ -609,11 +609,11 @@ def _rule_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
                 f["mark"] = "x"
             cur_b["mark"] = "x"
             # Reset the repeat counter: the checklist has moved on, so the next turn starts a fresh
-            # count. This also BOUNDS the branch -- without it, re-applying the rules to the revised
+            # count. This also BOUNDS the branch -- without it, re-applying the steers to the revised
             # plan would find the next bare milestone and close that one too, walking the whole plan.
             state["rep_n"] = 1
             return {"plan": _render(blocks), "requery_s2": True,
-                    "interventions": [{"rule": "repeat_cap", "kind": "milestone_closed",
+                    "interventions": [{"steer": "repeat_cap", "kind": "milestone_closed",
                                        "detail": f"repeat #{count} and no next fine step, but "
                                                  f"{later[0]['mid']} is still pending -- closing "
                                                  f"{cur_b['mid']} and re-asking System2, so this turn "
@@ -635,20 +635,20 @@ def _rule_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
         # >= not >: limit 3 stops ON the 3rd decline (5 executed attempts, the configuration
         # the 0.33%/0.47% cost was measured against), and limit 0 stops on the first (3 executed).
         if n_dec >= (limit or 1):
-            # Ephemeral signal consumed by final_milestone_retry later in this SAME rule pass. A
+            # Ephemeral signal consumed by final_milestone_retry later in this SAME steer pass. A
             # max-cap at the true end of the plan is a harness stop, not an environment outcome; if
-            # a final-milestone snapshot exists, the retry rule cancels this stop and spends the
+            # a final-milestone snapshot exists, the retry steer cancels this stop and spends the
             # remaining official-step budget replaying that milestone.
             state["_repeat_cap_max_cap"] = True
             return {"stop_episode": True,
-                    "interventions": [{"rule": "repeat_cap", "kind": "max_cap",
+                    "interventions": [{"steer": "repeat_cap", "kind": "max_cap",
                                        "detail": f"repeat #{count}, decline #{n_dec} at the END of "
                                                  f"the plan ({'retract terminal, ' if _retract else ''}"
                                                  f"limit {limit}) -- "
                                                  "no step or milestone left to advance into, so the "
                                                  "episode is stopped instead of running to max_turns",
                                        "before": subgoal, "after": "STOP (max_cap)"}]}
-        return {"interventions": [{"rule": "repeat_cap", "kind": "cap_declined",
+        return {"interventions": [{"steer": "repeat_cap", "kind": "cap_declined",
                                    "detail": f"repeat #{count}, decline #{n_dec} of {limit} -- no "
                                              "next fine step AND no later "
                                              "milestone; advancing would strand System2 (see the "
@@ -665,12 +665,12 @@ def _rule_repeat_cap(task: str, plan: str, subgoal: str, est, state) -> dict:
     state["rep_sg"], state["rep_n"] = _norm(new_sg), 1
     return {"plan": _render(blocks), "subgoal": new_sg, "subgoal_detail": new_sg,
             "interventions": [
-                {"rule": "repeat_cap", "kind": "plan_revised",
+                {"steer": "repeat_cap", "kind": "plan_revised",
                  "detail": f"repeat #{count} > {_capname}={cap}: marked "
                            f"{cur_f['fid']} done, advanced to {nxt_f['fid']}",
                  "before": f"{cur_f['fid']}: {cur_f['text']}",
                  "after": f"{nxt_f['fid']}: {nxt_f['text']}"},
-                {"rule": "repeat_cap", "kind": "subgoal_override",
+                {"steer": "repeat_cap", "kind": "subgoal_override",
                  "detail": "hand System1 the next fine step instead of the repeated one",
                  "before": subgoal, "after": new_sg}]}
 
@@ -684,7 +684,7 @@ _SINK_FAUCET_ON_RE = re.compile(
 )
 
 
-def _rule_sink_faucet_est(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_sink_faucet_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     """ANY task: a subgoal semantically turning on the sink faucet gets est_length >= 100.
 
     System2 budgeted this 50 (18x) or re-issued it as "continue to ..." (33x) -- i.e. it kept
@@ -707,12 +707,12 @@ def _rule_sink_faucet_est(task: str, plan: str, subgoal: str, est, state) -> dic
     if isinstance(est, int) and est >= 100:
         return {}
     return {"est_proposal": 100,
-            "interventions": [{"rule": "sink_faucet_est", "kind": "est_proposed",
+            "interventions": [{"steer": "sink_faucet_est", "kind": "est_proposed",
                                "detail": "sink-faucet activation needs est_length >= 100",
                                "before": est, "after": 100}]}
 
 
-def _rule_microwave_est_bump(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_microwave_est_bump(task: str, plan: str, subgoal: str, est, state) -> dict:
     """TurnOnMicrowave only: raise est_length one bucket -- 50->75, 75->100, ... 400->500.
     Retract-arm subgoals are exempt, and 500+ is left alone.
 
@@ -722,28 +722,28 @@ def _rule_microwave_est_bump(task: str, plan: str, subgoal: str, est, state) -> 
     precisely. That is the effect being exploited here, not the extra step allowance.
 
     EVIDENCE, on TurnOnMicrowave (all 20 episodes, same episodes as the baseline):
-        baseline (no rules)            12/20
+        baseline (no steers)            12/20
         rephrase + repeat cap          11/20
         + est bump 50->75, 75->100     18/20   press segments 35.7 -> 44.6 mean steps,
                                                task_finish failures 9 -> 2
     The failure there was System1 stopping short of depressing the button while its progress head
-    reported stop_rule; the longer conditioned motion actually depresses it. Consistent with
+    reported stop_criterion; the longer conditioned motion actually depresses it. Consistent with
     OpenStandMixerHead, whose est floor of 75 (from System2's flat 50) took it 13/20 -> 20/20.
 
     SCOPE CAUTION. That evidence is ONE task and ONE failure mode (under-shooting a contact), so the
-    rule is gated on exactly that task. TurnOnSinkFaucet uses sink_faucet_est instead, and
-    GetToastedBread uses its dedicated wait/slot rules.
+    steer is gated on exactly that task. TurnOnSinkFaucet uses sink_faucet_est instead, and
+    GetToastedBread uses its dedicated wait/slot steers.
 
     PROGREG INTERACTION, worth knowing before running the regression head with this on: for
     progreg, est_length ALSO selects the progress threshold
     (stop_criterion.PROGREG_THRESH_BY_EST -- 50/75 -> 0.88, 100 -> 0.92, else 0.95), so a bump makes
-    the stop rule STRICTER (75->100 raises the bar 0.88 -> 0.92). These runs are progact, where the
+    the stop criterion STRICTER (75->100 raises the bar 0.88 -> 0.92). These runs are progact, where the
     threshold is a flat 0.95 and only the conditioning and budget channels apply.
     """
     if task != "TurnOnMicrowave":
         return {}
     if _RETRACT_RE.match(_norm(subgoal)):
-        return {"interventions": [{"rule": "microwave_est_bump", "kind": "est_exempt",
+        return {"interventions": [{"steer": "microwave_est_bump", "kind": "est_exempt",
                                    "detail": "retract-arm step -- a short move away, left at "
                                              "System2's estimate",
                                    "before": est, "after": est}]}
@@ -751,13 +751,13 @@ def _rule_microwave_est_bump(task: str, plan: str, subgoal: str, est, state) -> 
     if new == est:
         return {}
     return {"est_proposal": new,
-            "interventions": [{"rule": "microwave_est_bump", "kind": "est_proposed",
+            "interventions": [{"steer": "microwave_est_bump", "kind": "est_proposed",
                                "detail": f"one bucket up ({est} -> {new}); conditioning tag, so "
                                          "System1 moves slower and more precisely",
                                "before": est, "after": new}]}
 
 
-def _rule_mixer_est_floor(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_mixer_est_floor(task: str, plan: str, subgoal: str, est, state) -> dict:
     """OpenStandMixerHead: every subgoal gets est_length of AT LEAST 75.
 
     A floor, not a fixed value: an estimate already >= 75 is left alone. System2 gave this task 50
@@ -766,7 +766,7 @@ def _rule_mixer_est_floor(task: str, plan: str, subgoal: str, est, state) -> dic
 
     WHY THIS IS NOT JUST A BUDGET CHANGE. The budget was never the binding constraint here -- with
     est 50 and horizon_mult 2 the budget is 100, while the measured segments ran mean 49-50 steps
-    and max 60, ending on the stop rule or env_success and NEVER on budget. What makes this rule
+    and max 60, ending on the stop criterion or env_success and NEVER on budget. What makes this steer
     bite is that ``est_length`` is also a POLICY CONDITIONING tag: it is sent to the server in the
     infer dict and rendered into System1's prompt as "Estimated Length" (see
     openpi robocasa_policy.py PROMPT_TAGS / build_prompt). So the floor changes the action
@@ -784,13 +784,13 @@ def _rule_mixer_est_floor(task: str, plan: str, subgoal: str, est, state) -> dic
     if cur is not None and cur >= MIXER_EST_FLOOR:
         return {}
     return {"est_proposal": MIXER_EST_FLOOR,
-            "interventions": [{"rule": "mixer_est_floor", "kind": "est_proposed",
+            "interventions": [{"steer": "mixer_est_floor", "kind": "est_proposed",
                                "detail": f"floor est_length at {MIXER_EST_FLOOR} (conditioning "
                                          "tag, not just budget)",
                                "before": est, "after": MIXER_EST_FLOOR}]}
 
 
-def _rule_coffee_m2_est(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_coffee_m2_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     """CoffeeSetupMug: EVERY M2.x step gets 100 steps -- except a retract-arm step.
 
     Keyed on the milestone POSITION rather than wording: M2.1 alone was phrased 6 different ways
@@ -815,14 +815,14 @@ def _rule_coffee_m2_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     # which System2 emits 47 times) still gets the full segment: that one does have to travel.
     _short = _RETRACT_RE.match(_norm(subgoal)) or _COFFEE_RELEASE_RE.match(_norm(subgoal))
     if _short:
-        return {"interventions": [{"rule": "coffee_m2_est", "kind": "est_exempt",
+        return {"interventions": [{"steer": "coffee_m2_est", "kind": "est_exempt",
                                    "detail": f"{fid} is a retract/release step -- left at System2's "
                                              "estimate, no full segment needed",
                                    "before": est, "after": est}]}
     if est == COFFEE_M2_EST:
         return {}
     return {"est_proposal": COFFEE_M2_EST,
-            "interventions": [{"rule": "coffee_m2_est", "kind": "est_proposed",
+            "interventions": [{"steer": "coffee_m2_est", "kind": "est_proposed",
                                "detail": f"{fid} (M2 milestone) needs a full segment",
                                "before": est, "after": COFFEE_M2_EST}]}
 
@@ -837,16 +837,16 @@ def _rule_coffee_m2_est(task: str, plan: str, subgoal: str, est, state) -> dict:
 _TOASTER_GRIP_STEPS = ("M1.1", "M1.2")
 
 
-# action_overrides() is called DIRECTLY by combined_eval, not through _RULES, so it needs its own
-# tier check: without it a "general rules only" arm still applied the GetToastedBread gripper pin,
+# action_overrides() is called DIRECTLY by combined_eval, not through _STEERS, so it needs its own
+# tier check: without it a "general steers only" arm still applied the GetToastedBread gripper pin,
 # and the arm was not general-only at all.
 #
 # The REGISTRY check below is no longer sufficient on its own. It was written when the arm was chosen
-# by editing _RULES, so "is a task rule registered?" answered "is this a task-rules arm?". The arm is
-# now chosen at RUNTIME by --task-rules, and _RULES always contains the task tier, so the caller must
+# by editing _STEERS, so "is a task steer registered?" answered "is this a task-lang-steer arm?". The arm is
+# now chosen at RUNTIME by --task-lang-steer, and _STEERS always contains the task tier, so the caller must
 # pass the tier in. Kept as a second condition so an unregistered task tier still disables it.
-def _task_rules_active() -> bool:
-    return any(f in _RULES for f in _TASK_RULES)
+def _task_lang_steer_active() -> bool:
+    return any(f in _STEERS for f in _TASK_STEERS)
 
 
 def action_overrides(task: str, plan: str, subgoal: str, *, task_tier: bool = True) -> dict:
@@ -862,7 +862,7 @@ def action_overrides(task: str, plan: str, subgoal: str, *, task_tier: bool = Tr
 
     Empty dict == no override, which is the untouched path.
     """
-    if not (task_tier and _task_rules_active()):
+    if not (task_tier and _task_lang_steer_active()):
         return {}
     if task == "GetToastedBread" and current_fine_id(plan) in _TOASTER_GRIP_STEPS:
         return {"grip": 1.0,
@@ -871,17 +871,17 @@ def action_overrides(task: str, plan: str, subgoal: str, *, task_tier: bool = Tr
     return {}
 
 
-# Order matters: the plan rewrite runs first so later rules see the revised checklist.
+# Order matters: the plan rewrite runs first so later steers see the revised checklist.
 
 # =============================================================================================
-# GRADUATED per-task rules. Each arrived via sys2_steering_exp.py and is promoted here only after a
-# run measured it. The measurement tables are kept inline so a rule is never re-litigated from
+# GRADUATED per-task steers. Each arrived via sys2_steering_exp.py and is promoted here only after a
+# run measured it. The measurement tables are kept inline so a steer is never re-litigated from
 # memory. Both sets are gated on ONE task and share the two helpers below.
 # =============================================================================================
 
 
 def _split_fine_step(plan: str, subgoal: str, match_re, second_text_fn, first_text_fn=None,
-                     milestone: str | None = None, rule: str = "split"):
+                     milestone: str | None = None, steer: str = "split"):
     """Split the first matching fine step into two, renumbering that milestone.
 
     Skips steps already marked done ([x]) -- that is history, and renumbering around it would change
@@ -909,7 +909,7 @@ def _split_fine_step(plan: str, subgoal: str, match_re, second_text_fn, first_te
             for k, ff in enumerate(new_fine, start=1):
                 ff["fid"] = f"{b['mid']}.{k}"
             b["fine"] = new_fine
-            iv = [{"rule": rule, "kind": "plan_revised",
+            iv = [{"steer": steer, "kind": "plan_revised",
                    "detail": f"split {f['fid']} into two steps",
                    "before": f"{f['fid']}: {f['text']}",
                    "after": [f"{x['fid']}: {x['text']}" for x in new_fine[i:i + 2]]}]
@@ -917,14 +917,14 @@ def _split_fine_step(plan: str, subgoal: str, match_re, second_text_fn, first_te
             if was_current:
                 out["subgoal"] = head
                 out["subgoal_detail"] = head
-                iv.append({"rule": rule, "kind": "subgoal_override",
+                iv.append({"steer": steer, "kind": "subgoal_override",
                            "detail": "run only the first half this turn",
                            "before": subgoal, "after": head})
             return out
     return {}
 
 
-def _advance_current_step(plan: str, subgoal: str, rule: str, detail: str):
+def _advance_current_step(plan: str, subgoal: str, steer: str, detail: str):
     """Mark the current fine step done and hand System1 the NEXT one.
 
     This is how "skip this subgoal" is implemented. It is deliberately NOT ``skip_s1``: a skipped
@@ -940,7 +940,7 @@ def _advance_current_step(plan: str, subgoal: str, rule: str, detail: str):
     cur = current_fine_id(plan)
     idx = next((i for i, (_, f) in enumerate(flat) if f["fid"] == cur), None)
     if idx is None or idx + 1 >= len(flat):
-        return {"interventions": [{"rule": rule, "kind": "advance_declined",
+        return {"interventions": [{"steer": steer, "kind": "advance_declined",
                                    "detail": "no next fine step -- advancing would strand System2",
                                    "before": subgoal, "after": subgoal}]}
     _, cur_f = flat[idx]
@@ -952,22 +952,22 @@ def _advance_current_step(plan: str, subgoal: str, rule: str, detail: str):
             b["mark"] = "x"
     return {"plan": _render(blocks), "subgoal": nxt_f["text"], "subgoal_detail": nxt_f["text"],
             "interventions": [
-                {"rule": rule, "kind": "plan_revised", "detail": detail,
+                {"steer": steer, "kind": "plan_revised", "detail": detail,
                  "before": f"{cur_f['fid']}: {cur_f['text']}",
                  "after": f"{nxt_f['fid']}: {nxt_f['text']}"},
-                {"rule": rule, "kind": "subgoal_override",
+                {"steer": steer, "kind": "subgoal_override",
                  "detail": "run the next step instead", "before": subgoal,
                  "after": nxt_f["text"]}]}
 
 
-def _advance_or_close_milestone(plan: str, subgoal: str, state, rule: str, detail: str,
+def _advance_or_close_milestone(plan: str, subgoal: str, state, steer: str, detail: str,
                                 state_key: str, max_closes: int = 2):
     """``_advance_current_step``, but when there is NO next fine step, close the MILESTONE instead.
 
     System2 unrolls fine steps ONE MILESTONE AT A TIME, so "the current step is the last fine step"
     usually does NOT mean "the end of the plan" -- the next milestone is sitting right there with no
     fine steps yet. Plain _advance_current_step declines in that situation, which is why a
-    skip-this-step rule can fire and change nothing (measured on CoffeeSetupMug: 26 firings, 26
+    skip-this-step steer can fire and change nothing (measured on CoffeeSetupMug: 26 firings, 26
     advance_declined, 0 skips).
 
     So: close the current milestone and set ``requery_s2``, which makes combined_eval ask System2
@@ -975,10 +975,10 @@ def _advance_or_close_milestone(plan: str, subgoal: str, state, rule: str, detai
     step of the next milestone. Same mechanism repeat_cap uses for its own exhausted-step case.
 
     BOUNDED by ``max_closes`` per episode via ``state[state_key]``: without a bound, re-applying the
-    rules to the revised plan could find the next bare milestone and close that one too, walking the
+    steers to the revised plan could find the next bare milestone and close that one too, walking the
     whole checklist in a single turn.
     """
-    r = _advance_current_step(plan, subgoal, rule, detail)
+    r = _advance_current_step(plan, subgoal, steer, detail)
     if not any(i.get("kind") == "advance_declined" for i in r.get("interventions", [])):
         return r                                      # a next fine step existed; ordinary advance
     if state.get(state_key, 0) >= max_closes:
@@ -1000,7 +1000,7 @@ def _advance_or_close_milestone(plan: str, subgoal: str, state, rule: str, detai
     cur_b["mark"] = "x"
     state[state_key] = state.get(state_key, 0) + 1
     return {"plan": _render(blocks), "requery_s2": True,
-            "interventions": [{"rule": rule, "kind": "milestone_closed",
+            "interventions": [{"steer": steer, "kind": "milestone_closed",
                                "detail": f"{detail} -- no next fine step, but {later[0]['mid']} is "
                                          f"still pending, so {cur_b['mid']} is closed and System2 is "
                                          "re-asked this turn for a step from the next milestone "
@@ -1010,9 +1010,9 @@ def _advance_or_close_milestone(plan: str, subgoal: str, state, rule: str, detai
 
 
 # =============================================================================================
-# GRADUATED: PickPlaceCounterToCabinet   (baseline 15/20, verified rules 14/20)
+# GRADUATED: PickPlaceCounterToCabinet   (baseline 15/20, verified steers 14/20)
 #
-# No rule has ever modified this task: repeat_cap is the only one that applies and it fired 33
+# No steer has ever modified this task: repeat_cap is the only one that applies and it fired 33
 # cap_declined / 0 advances, because the step it wants to cap is the LAST in the plan.
 #
 # All 6 failures in the verified run are max_turns at 14t, every one stuck repeating "continue to
@@ -1055,7 +1055,7 @@ _CONTINUE_PREFIX = "continue to "
 
 
 # Tasks where a subgoal_failed re-grasp is skipped. A SET, not one task, because the planner makes the
-# same mistake on both pick-and-place variants and the mechanism is identical -- so it is one rule with
+# same mistake on both pick-and-place variants and the mechanism is identical -- so it is one steer with
 # a task list, like _STRIP_RETRACT_TASKS / _DRAWER_ALIGN_TASKS, rather than a copy per task.
 #
 # EVIDENCE PER TASK -- turns where judge == subgoal_failed AND the subgoal is "grasp X again", scored
@@ -1072,11 +1072,11 @@ _CONTINUE_PREFIX = "continue to "
 #   reduction is the arithmetic consequence of the skips and is monotone with the mechanism.
 SKIP_FAILED_TASKS = tuple(
     t.strip() for t in os.environ.get(
-        "SYS2_RULES_SKIP_FAILED_TASKS",
+        "SYS2_LANG_STEER_SKIP_FAILED_TASKS",
         "PickPlaceCounterToCabinet,PickPlaceSinkToCounter").split(",") if t.strip())
 
 
-def _rule_skip_failed_regrasp(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_skip_failed_regrasp(task: str, plan: str, subgoal: str, est, state) -> dict:
     """SKIP_FAILED_TASKS: a re-grasp after subgoal_failed advances the plan instead of repeating.
 
     Was ``ppc2c_skip_failed`` and is recorded under that name in every run before 2026-08-15; the
@@ -1084,20 +1084,20 @@ def _rule_skip_failed_regrasp(task: str, plan: str, subgoal: str, est, state) ->
     """
     if task not in SKIP_FAILED_TASKS:
         return {}
-    # This rule handles System2's FALSE-POSITIVE failure judgement. If the physical width-gated
-    # recovery actually fired, its re-grasp must win; otherwise this rule would immediately rewrite
+    # This steer handles System2's FALSE-POSITIVE failure judgement. If the physical width-gated
+    # recovery actually fired, its re-grasp must win; otherwise this steer would immediately rewrite
     # the injected recovery into the next step and the dropped object would never be recovered.
     if state.get("judge") != "subgoal_failed" or state.get("regrasp_recovery_hit"):
         return {}
     if not _REGRASP_AGAIN_RE.match(subgoal or ""):
         return {}
-    # DO NOT OVERRIDE A RE-GRASP THE GRIPPER AGREES WITH. This rule's whole premise is that the
+    # DO NOT OVERRIDE A RE-GRASP THE GRIPPER AGREES WITH. This steer's whole premise is that the
     # subgoal_failed verdict is a FALSE POSITIVE -- a held object reading inside the closing band. The
     # width that settles it is already in state (the last step of the previous segment, i.e. the grasp
     # being judged), and regrasp_recovery cannot supply the verdict here because it is still in its
     # remember phase while the step is [~], where the width is deliberately not consulted.
     #
-    # Measured over three arms' PickPlaceCounterToCabinet episodes, every skip this rule made:
+    # Measured over three arms' PickPlaceCounterToCabinet episodes, every skip this steer made:
     #     19 of 21 had the object clearly HELD   0.0195 - 0.0709   <- genuine false positives
     #      2 of 21 had the fingers EMPTY         0.0031            <- the planner was RIGHT
     # (debug ep11 and qwen35-inst ep15). The bar sits in a wide gap between those groups, unlike the
@@ -1110,7 +1110,7 @@ def _rule_skip_failed_regrasp(task: str, plan: str, subgoal: str, est, state) ->
     w = state.get("grip_width")
     bar = regrasp_bar(subgoal or "")
     if w is None or w < bar:
-        return {"interventions": [{"rule": "skip_failed_regrasp", "kind": "skip_declined",
+        return {"interventions": [{"steer": "skip_failed_regrasp", "kind": "skip_declined",
                                    "detail": (f"gripper width {w:.4f} < {bar} -- the fingers really "
                                               "are empty, so System2's subgoal_failed is CORRECT; let "
                                               "its re-grasp run instead of advancing past it"
@@ -1136,11 +1136,11 @@ def _rule_skip_failed_regrasp(task: str, plan: str, subgoal: str, est, state) ->
     #
     # Note tx_counted is NOT width-gated (phase 1 counts on text alone), so this refund is not
     # "trusting" the planner: regrasp's phase-2 gate still requires the fingers to read empty, so on
-    # the false positive this rule is built for -- object held, width inside the holding band -- the
+    # the false positive this steer is built for -- object held, width inside the holding band -- the
     # refund changes nothing at all.
     if fid and state.pop(f"rg_{fid}_injected", None):
         r.setdefault("interventions", []).append(
-            {"rule": "skip_failed_regrasp", "kind": "regrasp_credit_refund",
+            {"steer": "skip_failed_regrasp", "kind": "regrasp_credit_refund",
              "detail": f"regrasp_recovery had counted System2's re-issue of {fid} as its one attempt; "
                        "that attempt is being skipped, so the credit is returned and the width-gated "
                        "recovery can still fire if the object really was dropped",
@@ -1148,7 +1148,7 @@ def _rule_skip_failed_regrasp(task: str, plan: str, subgoal: str, est, state) ->
     return r
 
 
-def _rule_ppc2c_grasp_est(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_ppc2c_grasp_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     """PickPlaceCounterToCabinet: floor a "grasp ..." subgoal at est 75 (one bucket up from 50)."""
     if task != PPC2C or not _GRASP_RE.match(_norm(subgoal)):
         return {}
@@ -1156,17 +1156,17 @@ def _rule_ppc2c_grasp_est(task: str, plan: str, subgoal: str, est, state) -> dic
     if isinstance(est, int) and est >= new:
         return {}
     return {"est_proposal": new,
-            "interventions": [{"rule": "ppc2c_grasp_est", "kind": "est_proposed",
+            "interventions": [{"steer": "ppc2c_grasp_est", "kind": "est_proposed",
                                "detail": f"grasp sets the pose everything downstream inherits "
                                          f"({est} -> {new}); conditioning tag",
                                "before": est, "after": new}]}
 
 
-def _rule_ppc2c_extra_carry(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_ppc2c_extra_carry(task: str, plan: str, subgoal: str, est, state) -> dict:
     """PickPlaceCounterToCabinet: add one extra "continue to <M2.1>" step after M2.1.
 
     Idempotent: the inserted step already starts with "continue to", so it never matches itself, and
-    the rule does nothing once the extra step exists. Skips a done M2.1 -- once the carry has been
+    the steer does nothing once the extra step exists. Skips a done M2.1 -- once the carry has been
     executed there is nothing to extend.
     """
     if task != PPC2C:
@@ -1190,7 +1190,7 @@ def _rule_ppc2c_extra_carry(task: str, plan: str, subgoal: str, est, state) -> d
             ff["fid"] = f"{b['mid']}.{k}"
         b["fine"] = new_fine
         return {"plan": _render(blocks),
-                "interventions": [{"rule": "ppc2c_extra_carry", "kind": "plan_revised",
+                "interventions": [{"steer": "ppc2c_extra_carry", "kind": "plan_revised",
                                    "detail": "give the carry a second segment before the release",
                                    "before": f"M2.1: {first['text']}",
                                    "after": f"M2.2: {extra}"}]}
@@ -1198,12 +1198,12 @@ def _rule_ppc2c_extra_carry(task: str, plan: str, subgoal: str, est, state) -> d
 
 
 # =============================================================================================
-# GRADUATED: CoffeeSetupMug   (baseline 10/20, verified rules 11/20)
+# GRADUATED: CoffeeSetupMug   (baseline 10/20, verified steers 11/20)
 #
 # Seven runs of the same 20 episodes:
 #     config                                  success   task_finish
-#     baseline (no rules)                      10/20         8
-#     verified rules only                      11/20         8
+#     baseline (no steers)                      10/20         8
+#     verified steers only                      11/20         8
 #     splits only                              10/20         8
 #     grasp est only                           10/20        10
 #     splits + grasp est                       13/20         3
@@ -1246,16 +1246,16 @@ _COFFEE_GRASP_RE = re.compile(r"^grasp\b.*\bmug$", re.IGNORECASE)
 COFFEE_GRASP_EST_FLOOR = 75
 
 
-def _rule_coffee_split_release(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_coffee_split_release(task: str, plan: str, subgoal: str, est, state) -> dict:
     """CoffeeSetupMug: M2 "<action> and release" -> "<action>" + "release the mug"."""
     if task != COFFEE:
         return {}
     return _split_fine_step(plan, subgoal, _COFFEE_AND_RELEASE_RE,
                             second_text_fn=lambda m: COFFEE_RELEASE_SUBGOAL,
-                            milestone="M2", rule="coffee_split_release")
+                            milestone="M2", steer="coffee_split_release")
 
 
-def _rule_coffee_split_reach_grasp(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_coffee_split_reach_grasp(task: str, plan: str, subgoal: str, est, state) -> dict:
     """CoffeeSetupMug: "reach and grasp X" -> "reach to X" + "grasp X"."""
     if task != COFFEE:
         return {}
@@ -1263,19 +1263,19 @@ def _rule_coffee_split_reach_grasp(task: str, plan: str, subgoal: str, est, stat
         plan, subgoal, _COFFEE_REACH_GRASP_RE,
         first_text_fn=lambda m: f"reach to {m.group('obj').strip()}",
         second_text_fn=lambda m: f"grasp {m.group('obj').strip()}",
-        rule="coffee_split_reach_grasp")
+        steer="coffee_split_reach_grasp")
 
 
-def _rule_coffee_grasp_est(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_coffee_grasp_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     """CoffeeSetupMug: floor a normal raw ``grasp ... mug`` subgoal at est 75."""
     # Do not call _norm here: stripping "continue to" / "again" would turn a continuation or
-    # recovery request into a false match for the normal grasp rule.
+    # recovery request into a false match for the normal grasp steer.
     if task != COFFEE or not _COFFEE_GRASP_RE.match((subgoal or "").strip()):
         return {}
     if isinstance(est, int) and est >= COFFEE_GRASP_EST_FLOOR:
         return {}
     return {"est_proposal": COFFEE_GRASP_EST_FLOOR,
-            "interventions": [{"rule": "coffee_grasp_est", "kind": "est_proposed",
+            "interventions": [{"steer": "coffee_grasp_est", "kind": "est_proposed",
                                "detail": "grasp sets the pose everything downstream inherits; "
                                          f"est floor {COFFEE_GRASP_EST_FLOOR}, conditioning tag",
                                "before": est, "after": COFFEE_GRASP_EST_FLOOR}]}
@@ -1298,25 +1298,25 @@ def _rule_coffee_grasp_est(task: str, plan: str, subgoal: str, est, state) -> di
 # -v2 arm. So the wasted turn is not free.
 #
 # Move the plan on rather than repeat the grasp. NOT the same mechanism as the graduated
-# _rule_skip_failed_regrasp, which advances one fine step via _advance_current_step: this rule closes
-# the whole grasp milestone and writes the NEXT milestone's steps out (see the rule body for why a
+# _steer_skip_failed_regrasp, which advances one fine step via _advance_current_step: this steer closes
+# the whole grasp milestone and writes the NEXT milestone's steps out (see the steer body for why a
 # re-query was tried and rejected). Deliberately NOT skip_s1 either -- a skipped turn does not step
 # the env, so _check_success can never fire; measured 4/8 -> 0/8 on TurnOnMicrowave.
 COFFEE_SKIP_FAILED = os.environ.get("SYS2_COFFEE_SKIP_FAILED", "1") not in ("", "0")
 
 
-def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> dict:
     """CoffeeSetupMug: a "grasp the mug again" re-grasp CLOSES the grasp milestone, writes the next
     milestone's four steps, and hands System1 the first of them.
 
-    NOT an advance-one-fine-step (that is ``_rule_skip_failed_regrasp``, via ``_advance_current_step``)
+    NOT an advance-one-fine-step (that is ``_steer_skip_failed_regrasp``, via ``_advance_current_step``)
     and NOT a re-query (``requery_s2``) -- System2 was asked again and confidently re-opened the
     milestone, so the rewrite is deterministic. The comment in the body records that experiment.
 
     Gates:
       * the "... again" form only (``_REGRASP_AGAIN_RE``), so a genuine FIRST grasp is never skipped;
       * declines when there is no LATER unfinished milestone to move into (nothing to write);
-      * at most ONE rewrite per episode (``state["coffee_skip_closes"]``), so re-applying the rules to
+      * at most ONE rewrite per episode (``state["coffee_skip_closes"]``), so re-applying the steers to
         the revised plan cannot walk the whole checklist.
 
     Like ``skip_failed_regrasp``, this requires ``judge == "subgoal_failed"``, a measured gripper width
@@ -1327,13 +1327,13 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
         return {}
     if not _REGRASP_AGAIN_RE.match(subgoal or ""):
         return {}
-    # THE SAME THREE GATES skip_failed_regrasp uses. This rule shipped with none of them, on the
+    # THE SAME THREE GATES skip_failed_regrasp uses. This steer shipped with none of them, on the
     # argument that the "... again" phrasing alone identified the false positive. Measured over the
     # four 30-episode CoffeeSetupMug arms, that is nearly true but not true:
     #     71 "grasp X again" turns, ALL of them judge == subgoal_failed  -> the judge gate is free
     #     68 with the mug HELD (0.0204-0.06, above the 0.003 mug bar)    -> unchanged behaviour
     #      3 with the fingers EMPTY (0.0014 / 0.0021 / 0.0017)           -> the skip was WRONG
-    # (base ep9 t2, base ep27 t2, v2 ep28 t2.) On those three the rule closed M1, wrote M2's steps and
+    # (base ep9 t2, base ep27 t2, v2 ep28 t2.) On those three the steer closed M1, wrote M2's steps and
     # sent System1 to carry a mug it was not holding -- and consumed regrasp_recovery's one attempt on
     # the way, so nothing could recover it. Zero coverage lost, three wrong skips prevented.
     if state.get("judge") != "subgoal_failed" or state.get("regrasp_recovery_hit"):
@@ -1341,7 +1341,7 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
     w = state.get("grip_width")
     bar = regrasp_bar(subgoal or "")
     if w is None or w < bar:
-        return {"interventions": [{"rule": "coffee_skip_failed", "kind": "skip_declined",
+        return {"interventions": [{"steer": "coffee_skip_failed", "kind": "skip_declined",
                                    "detail": (f"gripper width {w:.4f} < {bar} -- the mug is NOT held, "
                                               "so System2's subgoal_failed is correct; let its "
                                               "re-grasp run" if w is not None else
@@ -1356,7 +1356,7 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
     # -- and since apply_plan_update merges that, and combined_eval allows only ONE re-query per turn,
     # System1 still ran the re-grasp (ep0 t2: 192 wasted steps). System2's judgement here is wrong --
     # ep0's gripper width was 0.0204, inside the holding band -- but it is wrong CONFIDENTLY and
-    # REPEATEDLY, so the rule cannot rely on asking it again.
+    # REPEATEDLY, so the steer cannot rely on asking it again.
     #
     # This task's shape is fixed and known, so the next milestone is written out directly. The
     # phrasings are System2's OWN most frequent ones for these steps, so System1 sees in-distribution
@@ -1386,7 +1386,7 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
         return {}                                  # no milestone to move into
     # THE REWRITE IS SHAPE-SPECIFIC, so check the shape instead of assuming it. The four steps written
     # below are the mug-placement decomposition; they are only correct if the milestone being closed is
-    # the mug GRASP and the one being filled in is still unstarted. Without these checks the rule
+    # the mug GRASP and the one being filled in is still unstarted. Without these checks the steer
     # rewrote whatever happened to be current: with M3 "press the coffee machine start button" active
     # it produced "lift and carry the start button to the coffee machine dispenser" and overwrote M4
     # "retract the arm" with four placement steps; and with M2 already part-executed it reset a step
@@ -1397,7 +1397,7 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
             or not re.search(r"\bmug\b", cur_b["text"], re.IGNORECASE)
             or cur_f is None or not _REGRASP_RE.match(cur_f["text"])
             or not re.search(r"\bmug\b", cur_f["text"], re.IGNORECASE)):
-        return {"interventions": [{"rule": "coffee_skip_failed", "kind": "shape_declined",
+        return {"interventions": [{"steer": "coffee_skip_failed", "kind": "shape_declined",
                                    "detail": f"{cur_b['mid']} is {cur_b['text'].strip()!r}, not the mug "
                                              "grasp -- refusing to write the placement decomposition "
                                              "over an unrelated milestone",
@@ -1405,7 +1405,7 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
     if (nxt["mark"] != " " or nxt["fine"]
             or "mug" not in nxt["text"].lower()
             or not any(x in nxt["text"].lower() for x in ("coffee machine", "dispenser"))):
-        return {"interventions": [{"rule": "coffee_skip_failed", "kind": "shape_declined",
+        return {"interventions": [{"steer": "coffee_skip_failed", "kind": "shape_declined",
                                    "detail": f"{nxt['mid']} is not a bare, pending mug-placement "
                                              "milestone -- refusing to overwrite its authored steps "
                                              "or execution history",
@@ -1433,12 +1433,12 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
     # subgoal System2 asked for ("grasp the mug again"), so coffee_grasp_est's grasp bump was winning
     # est_resolve and the CARRY inherited it -- observed 75 in ep0 and 100 in ep1, i.e. an accidental
     # value derived from a subgoal that no longer exists. est_assign is applied after est_resolve, so
-    # this pins the rewritten step regardless of what the other rules proposed or what order they ran
+    # this pins the rewritten step regardless of what the other steers proposed or what order they ran
     # in. COFFEE_M2_EST (100) is the same value coffee_m2_est gives every other M2.x step.
     return {"plan": _render(blocks), "subgoal": new_sg, "subgoal_detail": new_sg,
             "est_assign": COFFEE_M2_EST,
             "interventions": [
-                {"rule": "coffee_skip_failed", "kind": "plan_revised",
+                {"steer": "coffee_skip_failed", "kind": "plan_revised",
                  "detail": "System2 judged the mug grasp failed, but a held mug reads ~0.012 on this "
                            f"thin handle (same band as the carry). {cur_b['mid']} marked done and "
                            f"{nxt['mid']} written out as its known 4 steps, no re-query (System2 was "
@@ -1446,10 +1446,10 @@ def _rule_coffee_skip_failed(task: str, plan: str, subgoal: str, est, state) -> 
                  "before": f"{cur_b['mid']} [~], {nxt['mid']} bare",
                  "after": f"{cur_b['mid']} [x], {nxt['mid']} [~] with "
                           f"{nxt['mid']}.1..{nxt['mid']}.{len(steps)}"},
-                {"rule": "coffee_skip_failed", "kind": "subgoal_override",
+                {"steer": "coffee_skip_failed", "kind": "subgoal_override",
                  "detail": "run the first step of the next milestone instead of the re-grasp",
                  "before": subgoal, "after": new_sg},
-                *([{"rule": "coffee_skip_failed", "kind": "regrasp_credit_refund",
+                *([{"steer": "coffee_skip_failed", "kind": "regrasp_credit_refund",
                     "detail": f"regrasp_recovery had counted System2's re-issue of {_fid} as its one "
                               "attempt; that attempt is being skipped, so the credit is returned",
                     "before": f"rg_{_fid} attempts used 1/1",
@@ -1460,19 +1460,19 @@ DRAWER = "PickPlaceDrawerToCounter"
 _DRAWER_TARGET_RE = re.compile(r"^grasp\b", re.IGNORECASE)
 _AGAIN_SUFFIX = " again"
 # Fingers closed below this = closed on nothing (graduated drawer re-grasp below).
-DRAWER_MISS_WIDTH = float(os.environ.get("SYS2_RULES_DRAWER_MISS_WIDTH", "0.010"))
+DRAWER_MISS_WIDTH = float(os.environ.get("SYS2_LANG_STEER_DRAWER_MISS_WIDTH", "0.010"))
 
 
 # GRADUATED: PickPlaceDrawerToCounter -- a MONITORED recovery re-grasp that never touches the plan.
 #
 # Measured on the same 20 episodes:
-#     baseline (no rules)                          14/20   mean  7.6 turns
-#     verified rules only                          16/20   mean  8.7   (also 19, 18, 18 in three
+#     baseline (no steers)                          14/20   mean  7.6 turns
+#     verified steers only                          16/20   mean  8.7   (also 19, 18, 18 in three
 #                                                                        further runs of that config)
 #     + "grasp X again" INSERTED into the plan      17/20   mean 10.7  <- rejected: +2 turns, and
 #                                                                        inside the verified spread
-#     + this rule, run a                           19/20   mean  8.2
-#     + this rule, run b                           20/20   mean  8.2  <- replicated, no turn cost
+#     + this steer, run a                           19/20   mean  8.2
+#     + this steer, run b                           20/20   mean  8.2  <- replicated, no turn cost
 #
 # WHY NOT PLAN SURGERY HERE, when PickPlaceCounterToCabinet needs exactly that: a CONTINUATION is
 # part of the intended sequence and benefits from being a real step (and gives repeat_cap a non-last
@@ -1481,7 +1481,7 @@ DRAWER_MISS_WIDTH = float(os.environ.get("SYS2_RULES_DRAWER_MISS_WIDTH", "0.010"
 #
 # The gate is deliberately tight and therefore rare -- it tripped on 2 of 20 grasp segments in one
 # run and 1 of 20 in each of these two. At n=20 its own contribution cannot be separated from the
-# verified rules; what is established is that it costs nothing when it does not fire. Widening is NOT
+# verified steers; what is established is that it costs nothing when it does not fire. Widening is NOT
 # free: 0.015 would catch two successful measuring-cup grasps, and re-grasping a held object risks
 # dropping it.
 # =============================================================================================
@@ -1510,7 +1510,7 @@ def _target_step(plan: str, milestone: str | None, target_re):
 
 
 def _inject_after_step(task_key: str, plan: str, subgoal: str, state, milestone: str,
-                       target_re, extra_fn, rule: str, why, tx_label: str,
+                       target_re, extra_fn, steer: str, why, tx_label: str,
                        phase2_gate=None, max_injections: int = 1,
                        missing_means_done: bool = False) -> dict:
     """Borrow turn(s) for an extra attempt once the target step completes. Plan NEVER modified.
@@ -1531,7 +1531,7 @@ def _inject_after_step(task_key: str, plan: str, subgoal: str, state, milestone:
     System2 drops the fine steps of a milestone when it marks that milestone [x] -- observed on
     ScrubCuttingBoard, where "* [~] M2.2: scrub the cutting board" is simply absent from the next
     turn's plan rather than becoming [x]. Without this the injection can never fire for a step that
-    is the last one in its milestone. OFF by default so rules that already measured with the
+    is the last one in its milestone. OFF by default so steers that already measured with the
     mark-based transition keep their exact behaviour.
     """
     done = state.get(f"{task_key}_injected", 0)
@@ -1542,7 +1542,7 @@ def _inject_after_step(task_key: str, plan: str, subgoal: str, state, milestone:
         held = state.pop(f"{task_key}_held")
         if done >= max_injections:
             return {"subgoal": held, "subgoal_detail": held,
-                    "interventions": [{"rule": rule, "kind": "tx_resume",
+                    "interventions": [{"steer": steer, "kind": "tx_resume",
                                        "detail": f"borrowed {done} turn(s); resuming the subgoal "
                                                  "System2 proposed before the interruption",
                                        "before": subgoal, "after": held}]}
@@ -1568,7 +1568,7 @@ def _inject_after_step(task_key: str, plan: str, subgoal: str, state, milestone:
         if _norm(raw) == _norm(base) and raw.lower() != base.lower():
             # same instruction, re-issued -- "continue to ..." or "... again"
             state[f"{task_key}_injected"] = done + 1
-            return {"interventions": [{"rule": rule, "kind": "tx_counted",
+            return {"interventions": [{"steer": steer, "kind": "tx_counted",
                                        "detail": f"System2 re-issued {step['fid']} itself "
                                                  f"({done + 1}/{max_injections} attempts used); "
                                                  "no borrowed turn added",
@@ -1596,18 +1596,18 @@ def _inject_after_step(task_key: str, plan: str, subgoal: str, state, milestone:
     # ep0: "search for the counter" was proposed at t28, discarded, and marked [x] at t29 without ever
     # being executed). The loop consumes this via pending_resume() and skips the S2 call entirely, so
     # the held subgoal runs against an unchanged plan and System2's next query sees the clip of THAT
-    # segment. apply_rules fills in subgoal_detail/est below.
+    # segment. apply_lang_steer fills in subgoal_detail/est below.
     state["_resume_pending"] = {
         "key": task_key,
-        "rule": rule,
+        "steer": steer,
         "subgoal": subgoal,
-        # A later post-rule may supersede this borrowed turn before System1 executes it. Name the
+        # A later post-steer may supersede this borrowed turn before System1 executes it. Name the
         # exact credit booked above so cancellation can refund only this transaction rather than
         # guessing from whichever grasp happens to be current later.
         "_injection_credit_key": f"{task_key}_injected",
     }
     return {"subgoal": extra, "subgoal_detail": extra, "tx_label": tx_label,
-            "interventions": [{"rule": rule, "kind": tx_label,
+            "interventions": [{"steer": steer, "kind": tx_label,
                                "detail": f"{state[f'{task_key}_fid']} completed; borrowed turn "
                                          f"{done + 1}/{max_injections} "
                                          f"({why() if callable(why) else why}). Plan untouched; "
@@ -1620,7 +1620,7 @@ def _cancel_pending_transaction(state: dict, *, canceled_by: str) -> dict | None
 
     This is intentionally different from consuming ``pending_resume``: normal consumption keeps the
     one-shot credit because the injected physical action ran. Cancellation happens within the same
-    rule pass, before System1 sees that action, so retaining the credit would disable a legitimate
+    steer pass, before System1 sees that action, so retaining the credit would disable a legitimate
     recovery after the plan is restarted.
     """
     pending = state.pop("_resume_pending", None)
@@ -1641,19 +1641,19 @@ def _cancel_pending_transaction(state: dict, *, canceled_by: str) -> dict | None
         else:
             state.pop(credit_key, None)
 
-    original_rule = pending.get("rule") or key or "unknown rule"
+    original_steer = pending.get("steer") or key or "unknown steer"
     return {
-        "rule": canceled_by,
+        "steer": canceled_by,
         "kind": "tx_canceled",
-        "detail": (f"superseded {original_rule}'s borrowed turn before System1 execution; "
+        "detail": (f"superseded {original_steer}'s borrowed turn before System1 execution; "
                    + (f"refunded {credit_key} from {credit_before} to {credit_after}"
                       if refunded else "no booked injection credit to refund")),
-        "before": pending.get("subgoal") or f"pending transaction from {original_rule}",
+        "before": pending.get("subgoal") or f"pending transaction from {original_steer}",
         "after": f"canceled by {canceled_by}",
     }
 
 
-def _rule_drawer_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_drawer_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> dict:
     """PickPlaceDrawerToCounter: one injected "grasp X again" turn after the M2 grasp completes."""
     if task != DRAWER:
         return {}
@@ -1661,14 +1661,14 @@ def _rule_drawer_regrasp_recovery(task: str, plan: str, subgoal: str, est, state
     # the PREVIOUS segment (plumbed by combined_eval) -- at injection time that is the grasp being
     # judged. Passed as a phase-2 gate, NOT checked up front: during the grasp turn the recorded width
     # is still the open-gripper value from the reach, so an up-front check would block the remember
-    # phase and the rule could never fire.
+    # phase and the steer could never fire.
     def _missed():
         w = state.get("grip_width")
         return w is not None and w < DRAWER_MISS_WIDTH
 
     return _inject_after_step(
         "drawer", plan, subgoal, state, "M2", _DRAWER_TARGET_RE,
-        extra_fn=lambda t: f"{t} again", rule="drawer_regrasp_recovery",
+        extra_fn=lambda t: f"{t} again", steer="drawer_regrasp_recovery",
         tx_label="tx_sg_failed", phase2_gate=_missed,
         why=lambda: f"gripper width {state.get('grip_width'):.4f} < {DRAWER_MISS_WIDTH} -- the "
                     "fingers closed on nothing, so the grasp missed")
@@ -1677,31 +1677,31 @@ def _rule_drawer_regrasp_recovery(task: str, plan: str, subgoal: str, est, state
 # GRADUATED: WashFruitColander -- drop a redundant carry CONTINUATION and run the next step.
 #
 #   arm (same 20 episode ids)                       success   total turns
-#   baseline, no rules                                9/20        438
-#   verified rules only                               5/20        485
-#   verified + this rule, run a                      12/20        380
-#   verified + this rule, run b                      13/20        375
-#   pooled with the rule                             25/40 = 62.5%
+#   baseline, no steers                                9/20        438
+#   verified steers only                               5/20        485
+#   verified + this steer, run a                      12/20        380
+#   verified + this steer, run b                      13/20        375
+#   pooled with the steer                             25/40 = 62.5%
 #
-#   vs the verified arm    z=+2.74  p=0.006     <- the paired control: identical official-rule
+#   vs the verified arm    z=+2.74  p=0.006     <- the paired control: identical official-steer
 #                                                  profile (sink_faucet_est / est_resolve /
 #                                                  repeat_cap all fire at the same rates), only
-#                                                  this rule added
-#   vs the no-rules arm    z=+1.29  p=0.20
+#                                                  this steer added
+#   vs the no-lang-steer arm    z=+1.29  p=0.20
 #   P(both runs >= 12 by chance): 1e-5 at the verified rate, 0.017 at the baseline rate.
-#   The rule fired 14x / 12x across 20 episodes, and total turns fell 22% -- episodes end in
+#   The steer fired 14x / 12x across 20 episodes, and total turns fell 22% -- episodes end in
 #   success instead of grinding to max_turns.
 #
-# READ THE GAIN HONESTLY: the official rules HURT this task (9/20 -> 5/20), so most of this is
-# recovering a self-inflicted loss -- 62.5% is only modestly above the 45% no-rules baseline, and
-# the comparison against it is not significant. _rule_sink_faucet_est is the prime suspect: it is
+# READ THE GAIN HONESTLY: the official steers HURT this task (9/20 -> 5/20), so most of this is
+# recovering a self-inflicted loss -- 62.5% is only modestly above the 45% no-lang-steer baseline, and
+# the comparison against it is not significant. _steer_sink_faucet_est is the prime suspect: it is
 # gated on SUBGOAL TEXT, not on task, so it fires here (173 est proposals in 20 episodes) even
 # though it was written for TurnOnSinkFaucet, where it measured 0/3. Scoping it to its own task is
 # the open follow-up and may capture much of the same gain on other tasks too.
 #
 # WHY IT WORKS -- not the reason predicted. The turn saving is trivial (repeat_cap already caps the
 # carry continuation at 3, so at most 2 turns on 8 episodes) and cannot convert an episode, because
-# every failure then burns 6-19 turns in a faucet-handle loop that this rule never touches. The
+# every failure then burns 6-19 turns in a faucet-handle loop that this steer never touches. The
 # effective channel is PHYSICAL: releasing the colander after ONE carry segment instead of up to
 # four changes where it lands in the basin, and correct placement is a precondition for the
 # fruit-washing and faucet steps that follow.
@@ -1714,11 +1714,11 @@ _WFC_CONT_CARRY_RE = re.compile(r"^\s*continue\s+to\s+(carry|move|bring|lift\s+a
                                  re.IGNORECASE)
 _WFC_CARRY_STEP_RE = re.compile(r"\b(carry|move|bring)\b", re.IGNORECASE)
 _WFC_RELEASE_STEP_RE = re.compile(r"\b(lower|release|place)\b", re.IGNORECASE)
-WFC_MAX_FIRES = int(os.environ.get("SYS2_RULES_WFC_MAX_FIRES", "1"))
+WFC_MAX_FIRES = int(os.environ.get("SYS2_LANG_STEER_WFC_MAX_FIRES", "1"))
 _WFC_STATE_KEY = "wfc_carry_skip_n"
 
 
-def _rule_wfc_skip_carry_continue(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_wfc_skip_carry_continue(task: str, plan: str, subgoal: str, est, state) -> dict:
     """WashFruitColander: "continue to carry the colander to the sink" -> run the NEXT step."""
     if task != WFC:
         return {}
@@ -1728,7 +1728,7 @@ def _rule_wfc_skip_carry_continue(task: str, plan: str, subgoal: str, est, state
         return {}
     n = state.get(_WFC_STATE_KEY, 0)
     if n >= WFC_MAX_FIRES:
-        return {"interventions": [{"rule": "wfc_skip_carry_continue", "kind": "cap_declined",
+        return {"interventions": [{"steer": "wfc_skip_carry_continue", "kind": "cap_declined",
                                    "detail": f"already fired {n}x this episode "
                                              f"(WFC_MAX_FIRES={WFC_MAX_FIRES}) -- leave the rest "
                                              "to repeat_cap",
@@ -1741,7 +1741,7 @@ def _rule_wfc_skip_carry_continue(task: str, plan: str, subgoal: str, est, state
     ct = cur_text.lower()
     if not cur_text or "colander" not in ct or not _WFC_CARRY_STEP_RE.search(ct) \
             or _WFC_RELEASE_STEP_RE.search(ct):
-        return {"interventions": [{"rule": "wfc_skip_carry_continue", "kind": "advance_declined",
+        return {"interventions": [{"steer": "wfc_skip_carry_continue", "kind": "advance_declined",
                                    "detail": f"current fine step {cur} is not the colander carry "
                                              f"({cur_text!r}) -- advancing would skip the release",
                                    "before": raw, "after": raw}]}
@@ -1759,19 +1759,19 @@ def _rule_wfc_skip_carry_continue(task: str, plan: str, subgoal: str, est, state
 # results mount.
 #
 #   arm (same 20 episode ids)                        success
-#   verified rules only (estbump sweep)               15/20
-#   debug-rules-v4-estbump / debug-cap800             16/20
-#   verified + these rules (debug-...-wait1200)       17/20
+#   verified steers only (estbump sweep)               15/20
+#   debug-lang-steer-v4-estbump / debug-cap800             16/20
+#   verified + these steers (debug-...-wait1200)       17/20
 #
 # THE SUCCESS DELTA IS NOT THE EVIDENCE: 17/20 vs 15/20 is p=0.43, and this task has sat at 15-17/20
-# across four recent runs -- squarely inside the n=20 band. The rule's own author says a 1-2 episode
+# across four recent runs -- squarely inside the n=20 band. The steer's own author says a 1-2 episode
 # outcome must not be read as a win or a loss, and that is respected here.
 #
-# WHAT JUSTIFIES GRADUATION is a STRUCTURAL DEFECT the rule fixes, measured directly. The stop rule
+# WHAT JUSTIFIES GRADUATION is a STRUCTURAL DEFECT the steer fixes, measured directly. The stop criterion
 # is "progress at threshold AND the arm has gone quiescent". While waiting for a toaster the arm
 # commands no motion BY DEFINITION, so quiescence is satisfied on the first window and the segment
 # ends after a few dozen steps with the toaster still running. In the recorded runs the wait segments
-# ended on the STOP RULE or lookahead -- voluntarily, not out of budget -- at a mean of 425 steps,
+# ended on the STOP CRITERION or lookahead -- voluntarily, not out of budget -- at a mean of 425 steps,
 # and System2 then re-issued "continue to wait" 14 times at a mean of 136 steps each. That re-issue
 # storm is the symptom. Forcing the segment length is the fix; no est bump can reach it, because est
 # only raises the budget and the budget was never what cut the wait short.
@@ -1780,7 +1780,7 @@ def _rule_wfc_skip_carry_continue(task: str, plan: str, subgoal: str, est, state
 # NOT ACTUALLY TASK-SPECIFIC -- the open follow-up. Any task whose plan contains a wait/hold has this
 # same defect, so scoping the fix to one task leaves the others broken. sys2_client.is_wait_subgoal
 # already recognises the family (hold/pause/stay/settle/remain) and SYS2_GTB_WAIT_ANY=1 selects it
-# here for measurement. The right end state is probably a task-agnostic wait rule, or a stop rule
+# here for measurement. The right end state is probably a task-agnostic wait steer, or a stop criterion
 # that does not treat a deliberately still arm as converged.
 #
 # force_steps BYPASSES --max-steps-cap by design (see run_s1_segment), so the wait gets its full
@@ -1814,7 +1814,7 @@ GTB_SLOT_EST_CAP = int(os.environ.get("SYS2_GTB_SLOT_EST", "150"))
 # Default 0: only "wait" was measured, and forcing 1200 steps of the wrong subgoal is expensive.
 GTB_WAIT_ANY = bool(os.environ.get("SYS2_GTB_WAIT_ANY"))
 
-# ANY occurrence of "wait" arms the rule -- the waiting is what needs the forced budget even as the
+# ANY occurrence of "wait" arms the steer -- the waiting is what needs the forced budget even as the
 # tail of a compound subgoal ("reach to the toaster slot and wait"). \bwait also covers waits/waiting.
 _GTB_WAIT_ANYWHERE_RE = re.compile(r"\bwait")
 # ...EXCEPT a subgoal OPENING with "continue to wait", which is System2 re-issuing a wait that has
@@ -1847,11 +1847,11 @@ def _gtb_is_wait(subgoal: str | None) -> bool:
 # recorded runs: "grasp the bread" 97, "grasp the sandwich bread" 15, "reach and grasp the bread" only
 # 2 -- so this is a rewrite, not a preference between two things it already does.
 GTB_REACH_GRASP = os.environ.get("SYS2_GTB_REACH_GRASP", "1") not in ("", "0")
-# A BARE grasp (no "reach and" already, and not a "... again" re-issue, which other rules own).
+# A BARE grasp (no "reach and" already, and not a "... again" re-issue, which other steers own).
 _GTB_BARE_GRASP_RE = re.compile(r"^(?:continue\s+to\s+)?grasp\b(?!.*\bagain\b)", re.IGNORECASE)
 
 
-def _rule_gtb_reach_grasp(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_gtb_reach_grasp(task: str, plan: str, subgoal: str, est, state) -> dict:
     """GetToastedBread: "grasp the bread" -> "reach and grasp the bread"."""
     if task != GTB or not GTB_REACH_GRASP:
         return {}
@@ -1874,7 +1874,7 @@ def _rule_gtb_reach_grasp(task: str, plan: str, subgoal: str, est, state) -> dic
                 f["text"] = new_sg
                 changed = True
     out = {"subgoal": new_sg, "subgoal_detail": new_sg,
-           "interventions": [{"rule": "gtb_reach_grasp", "kind": "subgoal_override",
+           "interventions": [{"steer": "gtb_reach_grasp", "kind": "subgoal_override",
                               "detail": "after the wait the gripper is parked above the slot, not "
                                         "around the bread; ask for the approach explicitly",
                               "before": raw, "after": new_sg}]}
@@ -1894,7 +1894,7 @@ def _rule_gtb_reach_grasp(task: str, plan: str, subgoal: str, est, state) -> dic
 # So: mark the wait done and hand System1 the next fine step, which is "grasp the bread" every time.
 #
 # Matches BOTH "continue to wait ..." and "continue to <motion> ... and wait" -- the first was already
-# exempt from forcing (it fell back to the ordinary stop rule) but still consumed a turn re-issuing a
+# exempt from forcing (it fell back to the ordinary stop criterion) but still consumed a turn re-issuing a
 # finished wait; the second was being forced a second time.
 # Default OFF: measured 22/30 raw vs 27/30 for addwait alone, with task_finish 3 -> 8. Those
 # continuations were NOT waste -- the bread genuinely had not popped, so advancing to the grasp closed
@@ -1914,7 +1914,7 @@ def _gtb_is_wait_continuation(subgoal: str | None) -> bool:
     return bool(_GTB_CONTINUE_RE.search(raw) and _GTB_WAIT_WORD_RE.search(raw))
 
 
-def _rule_gtb_skip_wait_cont(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_gtb_skip_wait_cont(task: str, plan: str, subgoal: str, est, state) -> dict:
     """GetToastedBread: a "continue to ... wait" re-issue advances the plan instead of waiting again."""
     if task != GTB or not GTB_SKIP_WAIT_CONT:
         return {}
@@ -1943,8 +1943,8 @@ def _rule_gtb_skip_wait_cont(task: str, plan: str, subgoal: str, est, state) -> 
 #     * M2.3 lift the bread (and retract the arm)
 #
 # So: the FIRST step of that milestone becomes "<text> and wait". That single edit converts it into a
-# compound move-then-wait, which _rule_gtb_wait_force_steps then recognises and runs for
-# GTB_WAIT_COMPOUND_STEPS (950) with the stop rule suppressed -- i.e. the arm travels to the slot and
+# compound move-then-wait, which _steer_gtb_wait_force_steps then recognises and runs for
+# GTB_WAIT_COMPOUND_STEPS (950) with the stop criterion suppressed -- i.e. the arm travels to the slot and
 # then holds there while the toaster finishes, instead of grabbing at nothing.
 #
 # Gated on the milestone being the PICK-UP one and on no wait having been seen anywhere in the episode
@@ -1953,7 +1953,7 @@ GTB_ADD_WAIT = os.environ.get("SYS2_GTB_ADD_WAIT", "1") not in ("", "0")
 _GTB_PICKUP_MILESTONE_RE = re.compile(r"\b(?:pick\s+up|pick|retrieve|take)\b.*\bbread\b", re.IGNORECASE)
 
 
-def _rule_gtb_add_wait(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_gtb_add_wait(task: str, plan: str, subgoal: str, est, state) -> dict:
     """GetToastedBread: if the pick-up milestone unrolls with NO wait, append " and wait" to its first
     step so the arm holds at the slot until the bread pops.
     """
@@ -1982,20 +1982,20 @@ def _rule_gtb_add_wait(task: str, plan: str, subgoal: str, est, state) -> dict:
     state["gtb_added_wait"] = True
     return {"plan": _render(blocks), "subgoal": new_text, "subgoal_detail": new_text,
             "interventions": [
-                {"rule": "gtb_add_wait", "kind": "plan_revised",
+                {"steer": "gtb_add_wait", "kind": "plan_revised",
                  "detail": f"{cur_b['mid']} unrolled with no wait step, so the grasp would happen "
                            f"before the bread pops; {first['fid']} becomes a move-then-wait, which "
-                           f"the wait rule then runs for {GTB_WAIT_COMPOUND_STEPS} forced steps",
+                           f"the wait steer then runs for {GTB_WAIT_COMPOUND_STEPS} forced steps",
                  "before": f"{first['fid']}: {new_text[:-9]}", "after": f"{first['fid']}: {new_text}"},
-                {"rule": "gtb_add_wait", "kind": "subgoal_override",
+                {"steer": "gtb_add_wait", "kind": "subgoal_override",
                  "detail": "hand System1 the move-then-wait form",
                  "before": subgoal, "after": new_text}]}
 
 
-def _rule_gtb_wait_force_steps(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_gtb_wait_force_steps(task: str, plan: str, subgoal: str, est, state) -> dict:
     """GetToastedBread: a wait subgoal runs a forced GTB_WAIT_FORCE_STEPS steps.
 
-    Overrides BOTH the stop rule and --max-steps-cap; see the banner for why no est bump can do this.
+    Overrides BOTH the stop criterion and --max-steps-cap; see the banner for why no est bump can do this.
     """
     if task != GTB or not _gtb_is_wait(subgoal):
         return {}
@@ -2007,7 +2007,7 @@ def _rule_gtb_wait_force_steps(task: str, plan: str, subgoal: str, est, state) -
     # the bread sometimes genuinely has not popped; letting it wait at its own est keeps the wait but
     # bounds it.
     if state.get("gtb_forced_wait"):
-        return {"interventions": [{"rule": "gtb_wait_force_steps", "kind": "force_exempt",
+        return {"interventions": [{"steer": "gtb_wait_force_steps", "kind": "force_exempt",
                                    "detail": "a forced wait window already ran this episode; this "
                                              "continuation uses System2's own est instead of a "
                                              "second full window",
@@ -2017,19 +2017,19 @@ def _rule_gtb_wait_force_steps(task: str, plan: str, subgoal: str, est, state) -
     steps = GTB_WAIT_COMPOUND_STEPS if compound else GTB_WAIT_FORCE_STEPS
     state["gtb_forced_wait"] = True      # so gtb_skip_wait_cont knows a window has already run
     return {"force_steps": steps,
-            "interventions": [{"rule": "gtb_wait_force_steps", "kind": "force_steps",
+            "interventions": [{"steer": "gtb_wait_force_steps", "kind": "force_steps",
                                "detail": (f"{'compound move-then-wait' if compound else 'pure wait'} "
-                                          f"subgoal -- run a forced {steps} steps (stop rule "
+                                          f"subgoal -- run a forced {steps} steps (stop criterion "
                                           "suppressed; a quiescent arm satisfies it immediately while "
                                           "the toaster is still running). Dense _check_success still "
                                           "ends the segment on completion."
                                           + (" A compound subgoal is two merged -- travel plus wait -- "
                                              "so it gets the longer window." if compound else "")),
-                               "before": "stop rule + budget",
+                               "before": "stop criterion + budget",
                                "after": f"forced {steps} steps"}]}
 
 
-def _rule_gtb_slot_est(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_gtb_slot_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     """GetToastedBread: a slot-positioning subgoal gets est_length CAPPED at GTB_SLOT_EST_CAP.
 
     A CAP, not a floor (it was a floor of 200): System2 asks 500-600 for what executes ~216 steps, and
@@ -2037,7 +2037,7 @@ def _rule_gtb_slot_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     est_assign because est_proposal resolves as the largest and therefore cannot lower.
 
     WAIT SUBGOALS ARE EXCLUDED. Several slot phrasings also end in "and wait" ("reach to the toaster
-    slot and wait", "move to the toaster slot and wait"); those are the wait rule's, whose force_steps
+    slot and wait", "move to the toaster slot and wait"); those are the wait steer's, whose force_steps
     governs the segment length outright. Capping their est too would tell System1 "150 steps" while the
     forced window runs 800 -- a conditioning tag contradicting the actual segment.
     """
@@ -2048,7 +2048,7 @@ def _rule_gtb_slot_est(task: str, plan: str, subgoal: str, est, state) -> dict:
     if not isinstance(est, int) or est <= GTB_SLOT_EST_CAP:
         return {}
     return {"est_assign": GTB_SLOT_EST_CAP,
-            "interventions": [{"rule": "gtb_slot_est", "kind": "est_assign",
+            "interventions": [{"steer": "gtb_slot_est", "kind": "est_assign",
                                "detail": f"slot positioning is a short move (mean 216 executed "
                                          f"steps); cap est at {GTB_SLOT_EST_CAP} instead of the "
                                          f"planner's {est} to hold total executed steps down",
@@ -2059,15 +2059,15 @@ def _rule_gtb_slot_est(task: str, plan: str, subgoal: str, est, state) -> dict:
 # onto the M1 reach subgoal.
 #
 #   arm (same 20 episode ids)                       success   mean turns
-#   baseline, no rules                                4/20       14.3
-#   verified rules only                               2/20       14.4
+#   baseline, no steers                                4/20       14.3
+#   verified steers only                               2/20       14.4
 #   ref control (today's code, no experiments)        1/20        -
 #   the SAME extra carry as a PLAN INSERT             2/20       14.7
-#   these two rules (borrowed turn + located reach)   6/20       13.2
+#   these two steers (borrowed turn + located reach)   6/20       13.2
 #
 # READ WITH THE CAVEAT: +4 over the verified arm sits exactly AT the n=20 resolution limit (~+-4 at
 # 2SD), and this task's own near-replicates span 1-4/20, so ONE run cannot separate a real +4 from a
-# lucky draw. Graduated on the session owner's decision without a confirming repeat. The two rules
+# lucky draw. Graduated on the session owner's decision without a confirming repeat. The two steers
 # also ran TOGETHER and fired in overlapping episodes, so the gain is NOT attributed between them.
 # What is solid is the mechanism trace: 9/20 episodes took a borrowed turn (tx_sg_incomplete 9,
 # tx_resume 9) with System2's own re-issues consuming the budget 10 times (tx_counted), 9 reach
@@ -2077,7 +2077,7 @@ def _rule_gtb_slot_est(task: str, plan: str, subgoal: str, est, state) -> dict:
 # against 2/20. The plan insert fired in 20/20 episodes and System2 executed the inserted step 51
 # times, so its 2/20 was not a plumbing failure -- putting the continuation in the checklist is simply
 # worse than borrowing one turn for it, which is the opposite of the PickPlaceCounterToCabinet result
-# and is why that rule keeps its plan-insert form.
+# and is why that steer keeps its plan-insert form.
 #
 # WHY THE CARRY. _check_success needs FOUR things: gripper far, object in the digital-scale
 # receptacle, object upright, cabinet closed. ep0 ends with the jam ON ITS SIDE beside the scale while
@@ -2090,9 +2090,9 @@ def _rule_gtb_slot_est(task: str, plan: str, subgoal: str, est, state) -> dict:
 # texts carry a phrase ("grasp the jam from the cabinet" 207, "grasp the canned food from the shelf"
 # 60) and half carry none ("grasp the honey bottle" 255), where this is a no-op.
 #
-# THE UNFIXED SINK, which neither rule touches: 14 of 20 still end in max_turns, and the terminal
+# THE UNFIXED SINK, which neither steer touches: 14 of 20 still end in max_turns, and the terminal
 # "continue to push the cabinet door closed" loop accounts for 13 of 18 failures in the verified arm.
-# 125 door-push segments over 20 episodes, mean 97 steps, and 106 of 125 end on the STOP RULE rather
+# 125 door-push segments over 20 episodes, mean 97 steps, and 106 of 125 end on the STOP CRITERION rather
 # than on budget -- an arm stalled against a door commands no motion, so action quiescence reads
 # "converged". That is the same structural defect as the graduated GetToastedBread wait, and
 # force_steps is the lever for it; an est bump cannot help, since only 11 of 125 were budget-limited.
@@ -2113,7 +2113,7 @@ _WI_DOOR_RE = re.compile(r"\b(door|handle|drawer)\b", re.IGNORECASE)
 WI_PHRASE_IN = bool(os.environ.get("SYS2_WI_PHRASE_IN"))
 
 
-def _rule_wi_extra_carry_turn(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_wi_extra_carry_turn(task: str, plan: str, subgoal: str, est, state) -> dict:
     """WeighIngredients: borrow ONE turn for "continue to carry ... to the digital scale".
 
     Plan-preserving: the checklist is untouched, System2's subgoal is held and resumed on the next
@@ -2125,13 +2125,13 @@ def _rule_wi_extra_carry_turn(task: str, plan: str, subgoal: str, est, state) ->
         return {}
     return _inject_after_step(
         "wi_carry", plan, subgoal, state, None, _WI_CARRY_RE,
-        extra_fn=lambda t: f"continue to {t}", rule="wi_extra_carry_turn",
+        extra_fn=lambda t: f"continue to {t}", steer="wi_extra_carry_turn",
         tx_label="tx_sg_incomplete", max_injections=1, missing_means_done=True,
         why="one more carry segment before the release, so the object ends ON the digital scale "
             "rather than beside it (the placement condition the ep0-shape failures never satisfy)")
 
 
-def _rule_wi_reach_locate(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_wi_reach_locate(task: str, plan: str, subgoal: str, est, state) -> dict:
     """WeighIngredients: append M1's location phrase to the M1 reach subgoal.
 
     SUBGOAL ONLY -- the plan is not modified. No-op when M1 states no location, when the reach already
@@ -2161,7 +2161,7 @@ def _rule_wi_reach_locate(task: str, plan: str, subgoal: str, est, state) -> dic
         return {}
     new = f"{(subgoal or '').strip().rstrip('.')} {phrase}"
     return {"subgoal": new, "subgoal_detail": new,
-            "interventions": [{"rule": "wi_reach_locate", "kind": "subgoal_override",
+            "interventions": [{"steer": "wi_reach_locate", "kind": "subgoal_override",
                                "detail": f"M1 says where the object is ({m1.strip()!r}) but the reach "
                                          "step drops it; carry the phrase down so System1 is told "
                                          "where to reach. Plan untouched.",
@@ -2172,11 +2172,11 @@ def _rule_wi_reach_locate(task: str, plan: str, subgoal: str, est, state) -> dic
 # GRADUATED: PackIdenticalLunches -- a width-gated re-grasp recovery, plus a reach continuation.
 #
 # MEASUREMENT (20 episodes, the manifest set, s1-progact270k / S2 ep3-11416, max_steps_cap 400)
-#     baseline, no rules at all                                   4/20
-#     verified rules only (no PIL rule)                           2/20
+#     baseline, no steers at all                                   4/20
+#     verified steers only (no PIL steer)                           2/20
 #     + re-grasp, window 3, miss<0.010, bare "grasp X again"       2/20   (debug-PIL-regrasp-v1)
 #     + re-grasp, window 2, miss<0.015, far form + est 125         8/20   (debug-PIL-regrasp-v3)
-# Paired vs the verified-rules arm on all 20: 6 GAINED (eps 5, 8, 11, 13, 18, 19), 0 LOST,
+# Paired vs the verified-lang-steer arm on all 20: 6 GAINED (eps 5, 8, 11, 13, 18, 19), 0 LOST,
 # exact McNemar p=0.031. task_finish 13 -> 9, so 4 of the 6 came out of the dominant failure
 # bucket. Against v1: 7 gained / 1 lost, p=0.070. Zero regressions across 20 paired episodes is
 # what carries this; +6 is outside the +-4.5-episode (2SD) noise band for n=20 on this task.
@@ -2220,21 +2220,21 @@ PIL = "PackIdenticalLunches"
 # "grasp X" and "reach and grasp X"; NOT "reach for X", which is positioning with the gripper open.
 _PIL_GRASP_RE = re.compile(r"^(reach\s+and\s+)?grasp\b", re.IGNORECASE)
 # Fingers closed below this = closed on NOTHING (see the bimodal gap above).
-PIL_MISS_WIDTH = float(os.environ.get("SYS2_RULES_PIL_MISS_WIDTH", "0.015"))
+PIL_MISS_WIDTH = float(os.environ.get("SYS2_LANG_STEER_PIL_MISS_WIDTH", "0.015"))
 # The recovery must land immediately after the grasp (offset 1) or right after the lift (offset 2).
-PIL_REGRASP_WINDOW = int(os.environ.get("SYS2_RULES_PIL_REGRASP_WINDOW", "2"))
+PIL_REGRASP_WINDOW = int(os.environ.get("SYS2_LANG_STEER_PIL_REGRASP_WINDOW", "2"))
 # est floor for a FAR recovery (offset 2), which has to travel back to the object first.
-PIL_FAR_EST = int(os.environ.get("SYS2_RULES_PIL_FAR_EST", "125"))
+PIL_FAR_EST = int(os.environ.get("SYS2_LANG_STEER_PIL_FAR_EST", "125"))
 _PIL_BARE_GRASP_RE = re.compile(r"^grasp\b", re.IGNORECASE)
 _PIL_REACH_GRASP_RE = re.compile(r"^reach\s+and\s+grasp\b", re.IGNORECASE)
-# Pure positioning reach for the continuation rule.
+# Pure positioning reach for the continuation steer.
 _PIL_REACH_RE = re.compile(r"^reach\s+(to|for)\b", re.IGNORECASE)
-PIL_REACH_EST = int(os.environ.get("SYS2_RULES_PIL_REACH_EST", "50"))
-# On by default (it was part of the measured arm); SYS2_RULES_PIL_REACH_CONTINUE=0 disables it.
-PIL_REACH_CONTINUE = (os.environ.get("SYS2_RULES_PIL_REACH_CONTINUE", "1") not in ("", "0"))
+PIL_REACH_EST = int(os.environ.get("SYS2_LANG_STEER_PIL_REACH_EST", "50"))
+# On by default (it was part of the measured arm); SYS2_LANG_STEER_PIL_REACH_CONTINUE=0 disables it.
+PIL_REACH_CONTINUE = (os.environ.get("SYS2_LANG_STEER_PIL_REACH_CONTINUE", "1") not in ("", "0"))
 
 
-def _rule_pil_reach_continue(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_pil_reach_continue(task: str, plan: str, subgoal: str, est, state) -> dict:
     """PackIdenticalLunches: ONE borrowed "continue to reach ..." turn after a short reach.
 
     Scope is deliberately narrow: only ``reach to/for X`` (never "reach and grasp X", where a
@@ -2266,7 +2266,7 @@ def _rule_pil_reach_continue(task: str, plan: str, subgoal: str, est, state) -> 
     key = f"pilrc_{fid}"
     return _inject_after_step(
         key, plan, subgoal, state, None, _PIL_REACH_RE,
-        extra_fn=lambda t: f"continue to {t}", rule="pil_reach_continue",
+        extra_fn=lambda t: f"continue to {t}", steer="pil_reach_continue",
         tx_label="tx_sg_incomplete",
         phase2_gate=lambda: state.get(f"{key}_est") == PIL_REACH_EST,
         max_injections=1, missing_means_done=True,
@@ -2274,7 +2274,7 @@ def _rule_pil_reach_continue(task: str, plan: str, subgoal: str, est, state) -> 
                     "to close the remaining distance before the grasp")
 
 
-def _rule_pil_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_pil_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> dict:
     """PackIdenticalLunches: one injected re-grasp per grasp whose fingers closed on nothing.
 
     Keyed PER GRASP STEP (``pil_<fid>``) because this task has four picks; keyed on the fid rather
@@ -2282,7 +2282,7 @@ def _rule_pil_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -
     """
     if task != PIL:
         return {}
-    # Own turn counter (the rule is called exactly once per turn, from apply_rules).
+    # Own turn counter (the steer is called exactly once per turn, from apply_lang_steer).
     state["pil_turn"] = turn = state.get("pil_turn", 0) + 1
     # At most one grasp step is ever visible: System2 lists fine steps only for the milestone in
     # progress and DROPS them when it closes that milestone.
@@ -2318,19 +2318,19 @@ def _rule_pil_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -
 
     r = _inject_after_step(
         key, plan, subgoal, state, None, _PIL_GRASP_RE,
-        extra_fn=_extra, rule="pil_regrasp_recovery",
+        extra_fn=_extra, steer="pil_regrasp_recovery",
         tx_label="tx_sg_failed", phase2_gate=_missed, max_injections=1,
         missing_means_done=True,
         why=lambda: f"gripper width {state.get('grip_width'):.4f} < {PIL_MISS_WIDTH} -- the fingers "
                     f"are closed on nothing {turn - state[f'{key}_gturn']} turn(s) after {fid}, so "
                     "the object was never held or was dropped on the lift"
                     + (" (arm has already left the object: reach first)" if far else ""))
-    # A FAR recovery needs the steps to reach back first. est is PROPOSED, so apply_rules resolves it
+    # A FAR recovery needs the steps to reach back first. est is PROPOSED, so apply_lang_steer resolves it
     # as the largest of this and System2's own value -- 125 is a FLOOR, not an assignment.
     if far and any(iv.get("kind") == "tx_sg_failed" for iv in r.get("interventions", [])):
         r["est_proposal"] = PIL_FAR_EST
         r["interventions"].append(
-            {"rule": "pil_regrasp_recovery", "kind": "est_proposed",
+            {"steer": "pil_regrasp_recovery", "kind": "est_proposed",
              "detail": f"far recovery ({offset} turns after the grasp): est floor {PIL_FAR_EST} to "
                        "cover reaching back to the object before closing",
              "before": est, "after": PIL_FAR_EST})
@@ -2340,8 +2340,8 @@ def _rule_pil_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -
 # =============================================================================================
 # GENERAL: width-gated re-grasp recovery, for EVERY task.
 #
-# Generalised from two graduated per-task copies (_rule_pil_regrasp_recovery, PackIdenticalLunches
-# 2/20 -> 8/20; _rule_drawer_regrasp_recovery, part of PickPlaceDrawerToCounter 14/20 -> 19/20) plus a
+# Generalised from two graduated per-task copies (_steer_pil_regrasp_recovery, PackIdenticalLunches
+# 2/20 -> 8/20; _steer_drawer_regrasp_recovery, part of PickPlaceDrawerToCounter 14/20 -> 19/20) plus a
 # PreSoakPan port. The mechanism is not task-specific: if the fingers closed on nothing, the object was
 # never held or was dropped, and one re-grasp is the cheapest possible recovery.
 #
@@ -2375,7 +2375,7 @@ def _rule_pil_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -
 # "level" is included at the session owner's request. NOTE it matches nothing in either 1500-episode
 # sweep -- no grasp subgoal mentions "level" or "lever" -- so today it is a no-op guard for objects
 # this corpus has not produced. The near-neighbour that DOES occur is the kettle "lever", and only in
-# PRESS subgoals ("press the kettle lever down"), which this rule never examines: it looks at grasp
+# PRESS subgoals ("press the kettle lever down"), which this steer never examines: it looks at grasp
 # steps only.
 # Measured effect over 2558 recorded grasp turns: 1258 skipped (49%), 1300 monitored, and just 5 false
 # positives (0.2%) -- sponge x2, chicken drumstick, croissant, broccoli, all compressible foods that no
@@ -2410,7 +2410,7 @@ _REGRASP_REPLAY_RELEASE_RE = re.compile(
 # WIDTH LADDER, not a single bar. A binary skip list threw away real drops: PickPlaceDrawerToCounter's
 # three successful re-grasps were on a pizza cutter (0.0021), a measuring cup (0.0024) and a dish brush
 # (0.0043) -- and two of those objects were on the skip list, so skipping them lost the very cases the
-# rule exists for. Instead every object gets a bar, and thin objects simply get a TIGHTER one:
+# steer exists for. Instead every object gets a bar, and thin objects simply get a TIGHTER one:
 #
 #   0.015   default -- normal objects (pan, bread, knife, toast, drumstick, strawberry, potato, ...)
 #   0.0075  thin-ish: held below the default bar, but never below this one
@@ -2428,16 +2428,16 @@ _REGRASP_REPLAY_RELEASE_RE = re.compile(
 # broccoli, bread, pan, onion, sink spout. Those are compressible foods, or the width was read at a
 # moment the gripper had legitimately released. No ladder fixes them; 15 in 2558 grasp turns is 0.6%,
 # each costing one borrowed turn.
-REGRASP_MISS_WIDTH = float(os.environ.get("SYS2_RULES_REGRASP_MISS_WIDTH", "0.015"))
-REGRASP_BAR_THIN = float(os.environ.get("SYS2_RULES_REGRASP_BAR_THIN", "0.0075"))
-REGRASP_BAR_VERY_THIN = float(os.environ.get("SYS2_RULES_REGRASP_BAR_VERY_THIN", "0.003"))
+REGRASP_MISS_WIDTH = float(os.environ.get("SYS2_LANG_STEER_REGRASP_MISS_WIDTH", "0.015"))
+REGRASP_BAR_THIN = float(os.environ.get("SYS2_LANG_STEER_REGRASP_BAR_THIN", "0.0075"))
+REGRASP_BAR_VERY_THIN = float(os.environ.get("SYS2_LANG_STEER_REGRASP_BAR_VERY_THIN", "0.003"))
 # How many turns after the grasp a drop still counts. Offset 0 is HEALTHY in the cases that fail (the
 # object is lost during the NEXT segment), and beyond +2 the arm has moved on.
-REGRASP_WINDOW = int(os.environ.get("SYS2_RULES_REGRASP_WINDOW", "2"))
+REGRASP_WINDOW = int(os.environ.get("SYS2_LANG_STEER_REGRASP_WINDOW", "2"))
 # est floors for the retry, from what those segments actually consume (grasp p90 75; reach-and-grasp
 # p90 150, median 100). Floors, resolved as max(floor, the failed grasp est, System2 est for the turn).
-REGRASP_NEAR_EST = int(os.environ.get("SYS2_RULES_REGRASP_NEAR_EST", "75"))
-REGRASP_FAR_EST = int(os.environ.get("SYS2_RULES_REGRASP_FAR_EST", "125"))
+REGRASP_NEAR_EST = int(os.environ.get("SYS2_LANG_STEER_REGRASP_NEAR_EST", "75"))
+REGRASP_FAR_EST = int(os.environ.get("SYS2_LANG_STEER_REGRASP_FAR_EST", "125"))
 
 # Matched with \b...\b word boundaries, NOT substrings: "straw" must not catch strawberry (0.0419,
 # thick) and "pot" must not catch potato (0.0523) or sweet potato (0.0361).
@@ -2520,7 +2520,7 @@ def _regrasp_replay_candidate(state: dict) -> tuple[dict | None, str | None]:
     }, None
 
 
-def _rule_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> dict:
     """ALL tasks: one injected re-grasp per grasp step whose fingers closed on nothing."""
     state["rg_turn"] = turn = state.get("rg_turn", 0) + 1
     step = _target_step(plan, None, _REGRASP_RE)
@@ -2559,7 +2559,7 @@ def _rule_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> di
 
     r = _inject_after_step(
         key, plan, subgoal, state, None, _REGRASP_RE,
-        extra_fn=_extra, rule="regrasp_recovery",
+        extra_fn=_extra, steer="regrasp_recovery",
         tx_label="tx_sg_failed", phase2_gate=_missed, max_injections=1,
         missing_means_done=True,
         why=lambda: f"gripper width {state.get('grip_width'):.4f} < "
@@ -2568,13 +2568,13 @@ def _rule_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> di
                     "object was never held or was dropped"
                     + (" (the arm has moved on: reach back first)" if far else ""))
     if any(iv.get("kind") == "tx_sg_failed" for iv in r.get("interventions", [])):
-        # Per-turn coordination signal for later rules. This means the recovery INJECTED a turn;
+        # Per-turn coordination signal for later steers. This means the recovery INJECTED a turn;
         # tx_counted (System2 independently asked for the same re-grasp) is deliberately not a hit.
         state["regrasp_recovery_hit"] = True
         floor = max(REGRASP_FAR_EST if far else REGRASP_NEAR_EST, state.get(f"{key}_gest") or 0)
         r["est_proposal"] = floor
         r["interventions"].append(
-            {"rule": "regrasp_recovery", "kind": "est_proposed",
+            {"steer": "regrasp_recovery", "kind": "est_proposed",
              "detail": f"{'reach-back' if far else 'in-place'} recovery at offset {offset}: est floor "
                        f"{floor} = max({REGRASP_FAR_EST if far else REGRASP_NEAR_EST}, "
                        f"grasp est {state.get(f'{key}_gest')})",
@@ -2588,7 +2588,7 @@ def _rule_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> di
             if replay is not None and pending is not None:
                 pending.setdefault("before_resume", []).append(replay)
                 r["interventions"].append(
-                    {"rule": "regrasp_recovery", "kind": "tx_replay_queued",
+                    {"steer": "regrasp_recovery", "kind": "tx_replay_queued",
                      "detail": "offset+2 reach-back rewinds the physical state; queued the "
                                "intervening executed subgoal before System2's held subgoal",
                      "before": subgoal, "after": replay["subgoal"]})
@@ -2606,7 +2606,7 @@ def _rule_regrasp_recovery(task: str, plan: str, subgoal: str, est, state) -> di
                             "No safe replay is available, so System2 will be re-queried after.",
                         )
                 r["interventions"].append(
-                    {"rule": "regrasp_recovery", "kind": "tx_replay_declined",
+                    {"steer": "regrasp_recovery", "kind": "tx_replay_declined",
                      "detail": f"offset+2 replay unavailable ({reason}); System2 will be "
                                "queried after the reach-back instead of blindly resuming its held "
                                "subgoal. Plan untouched.",
@@ -2701,7 +2701,7 @@ def _final_retry_grasp_target(*texts: str) -> str | None:
     return None
 
 
-def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) -> dict:
     """ALL tasks: retry the last milestone before accepting a false terminal loop.
 
     This is official-step loop v6. It does not reset the simulator. It restores the checklist
@@ -2709,7 +2709,7 @@ def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) 
     carry-and-lower, and lower-and-release borrow one turn to reach and grasp the named object before
     replaying the cached subgoal. Every other first subgoal is replayed directly, followed by a
     normal System2 query. By default the retry can recur until the evaluator reaches its rollout
-    limit; ``SYS2_RULES_FINAL_MILESTONE_RETRY_MAX=N`` supplies an optional positive retry cap.
+    limit; ``SYS2_LANG_STEER_FINAL_MILESTONE_RETRY_MAX=N`` supplies an optional positive retry cap.
 
     Trigger only while the privileged environment status is still ongoing, on any of:
       * System2 judging ``task_finish``; or
@@ -2757,13 +2757,13 @@ def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) 
     effective = f"reach and grasp {target}" if target else replay
     cached["retry_count"] = cached.get("retry_count", 0) + 1
     # Keep repeat_cap aligned with the action that physically runs now and cancel a max_cap decision
-    # from earlier in this same rule pass.
+    # from earlier in this same steer pass.
     state["rep_sg"] = _norm(effective)
     state["rep_n"] = 1
     state["rep_declines"] = 0
     state["_executed_retract_streak"] = 0
     # Another recovery may have tentatively borrowed this same S2 turn before this last-priority
-    # rule saw the terminal condition. Discard that transaction before installing our own explicit
+    # steer saw the terminal condition. Discard that transaction before installing our own explicit
     # reach/grasp -> replay queue.
     canceled_tx = _cancel_pending_transaction(
         state, canceled_by="final_milestone_retry")
@@ -2773,7 +2773,7 @@ def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) 
         # the loop queries S2 normally.
         state["_resume_pending"] = {
             "key": "final_milestone_retry",
-            "rule": "final_milestone_retry",
+            "steer": "final_milestone_retry",
             "subgoal": replay,
             "subgoal_detail": cached["subgoal_detail"],
             "est": cached.get("est"),
@@ -2794,10 +2794,10 @@ def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) 
         "stop_episode": False,
         "requery_s2": False,
         "interventions": ([canceled_tx] if canceled_tx else []) + [
-            {"rule": "final_milestone_retry", "kind": "plan_revised",
+            {"steer": "final_milestone_retry", "kind": "plan_revised",
              "detail": f"{why}; restore {cached['mid']} to its exact starting checklist",
              "before": plan, "after": cached["plan"]},
-            {"rule": "final_milestone_retry", "kind": "subgoal_override",
+            {"steer": "final_milestone_retry", "kind": "subgoal_override",
              "detail": ("official-step loop v6: borrow this turn to reacquire the object, replay "
                         "the cached first milestone subgoal next turn, then query System2" if target
                         else "official-step loop v6: the cached first milestone subgoal is not one "
@@ -2808,11 +2808,11 @@ def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) 
     }
     if target:
         result["interventions"].extend([
-            {"rule": "final_milestone_retry", "kind": "tx_replay_queued",
+            {"steer": "final_milestone_retry", "kind": "tx_replay_queued",
              "detail": "queued the cached first final-milestone subgoal immediately after the "
                        "borrowed re-grasp",
              "before": "query System2 next turn", "after": replay},
-            {"rule": "final_milestone_retry", "kind": "est_proposed",
+            {"steer": "final_milestone_retry", "kind": "est_proposed",
              "detail": f"borrowed reach-back grasp gets est floor {REGRASP_FAR_EST}",
              "before": est, "after": REGRASP_FAR_EST},
         ])
@@ -2822,12 +2822,12 @@ def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) 
     if fake_finish:
         result["suppress_task_finish"] = True
         result["interventions"].append(
-            {"rule": "final_milestone_retry", "kind": "task_finish_suppressed",
+            {"steer": "final_milestone_retry", "kind": "task_finish_suppressed",
              "detail": "environment reports ongoing, so execute the retry instead of terminating",
              "before": "task_finish", "after": "ongoing retry"})
     if max_cap:
         result["interventions"].append(
-            {"rule": "final_milestone_retry", "kind": "max_cap_suppressed",
+            {"steer": "final_milestone_retry", "kind": "max_cap_suppressed",
              "detail": "repeat_cap is a harness stop and official env steps remain, so replay the "
                        "last milestone instead of terminating",
              "before": "max_cap", "after": "ongoing retry"})
@@ -2835,24 +2835,24 @@ def _rule_final_milestone_retry(task: str, plan: str, subgoal: str, est, state) 
 
 
 # ---- THE THREE TIERS -----------------------------------------------------------------------------
-# MANDATORY: always runs, even with --task-rules OFF. repeat_cap is not an optional revision of
+# MANDATORY: always runs, even with --task-lang-steer OFF. repeat_cap is not an optional revision of
 # System2's output -- it is the loop's own termination policy. Without it a stuck subgoal is re-issued
-# until max_turns with nothing advancing, so "no rules" would mean "no way out of a repeat", which is
+# until max_turns with nothing advancing, so "no steers" would mean "no way out of a repeat", which is
 # not a meaningful baseline of the model. So the floor for every run is repeat_cap, and what
-# --task-rules adds is the OPTIONAL tiers below.
+# --task-lang-steer adds is the OPTIONAL tiers below.
 #
-# It is deliberately NOT in _GENERAL_RULES: that tier is "task-agnostic revisions you may switch on",
-# and repeat_cap is not switchable. SYS2_RULES_NO_MANDATORY=1 does disable it, for the single purpose
-# of reproducing the historical 1000-episode zero-rules baseline that predates this tier.
-_MANDATORY_RULES = (_rule_repeat_cap,)
-_MANDATORY_ON = os.environ.get("SYS2_RULES_NO_MANDATORY", "") in ("", "0")
+# It is deliberately NOT in _GENERAL_STEERS: that tier is "task-agnostic revisions you may switch on",
+# and repeat_cap is not switchable. SYS2_LANG_STEER_NO_MANDATORY=1 does disable it, for the single purpose
+# of reproducing the historical 1000-episode zero-lang-steer baseline that predates this tier.
+_MANDATORY_STEERS = (_steer_repeat_cap,)
+_MANDATORY_ON = os.environ.get("SYS2_LANG_STEER_NO_MANDATORY", "") in ("", "0")
 
 
 def mandatory_on() -> bool:
     """Whether the mandatory tier is active. Public because callers record the arm they ran."""
     return _MANDATORY_ON
 
-# OPTIONAL, and NOT gated on a task name -- that is what makes a rule general here. Some
+# OPTIONAL, and NOT gated on a task name -- that is what makes a steer general here. Some
 # are gated on the SUBGOAL TEXT instead, so they fire on whichever task performs that operation; the
 # tier means "selected by semantics, not by task", not "fires on all 50 tasks".
 #
@@ -2864,7 +2864,7 @@ def mandatory_on() -> bool:
 #                      were retired in its favour and then left unregistered, so both wins were dark.
 #                      Instrumented over 2558 grasp turns: 49% skipped by the object ladder, 0.2%
 #                      false positives, 0.6% irreducible misfires at one borrowed turn each.
-#                      NOT established as a general rule: the all-tasks form has no A/B of its own,
+#                      NOT established as a general steer: the all-tasks form has no A/B of its own,
 #                      the PreSoakPan port was 13/20 -> 11/20 (p=0.688, no effect either way), and no
 #                      replicate of the PIL arm was ever run.
 #   press_again        subgoal- or task-gated on microwave / kettle / coffee machine (was
@@ -2872,73 +2872,73 @@ def mandatory_on() -> bool:
 #                      button turns, WaffleReheat 36, PrepareCoffee 11): "continue to press X" ->
 #                      "press X again" for System1 only. NO A/B at all -- the support is that the
 #                      "... again" form is in-distribution (9x / 2x as its own subgoal) while
-#                      "continue to" is System2's wrapper. Cheapest possible rule: it changes only
+#                      "continue to" is System2's wrapper. Cheapest possible steer: it changes only
 #                      the string handed to System1, never the checklist, the est or the budget.
 #   sink_faucet_est    subgoal-gated on the faucet ACTIVATION phrase, so ~80% of its firings are on
 #                      the composite sink tasks (WashLettuce 138 faucet turns, RinseSinkBasin 99,
 #                      WashFruitColander 94, PreSoakPan 89) rather than the atomic one (51). Floors
 #                      est at 100 because System2 budgeted 50 (18x) or re-issued "continue to" (33x).
 #                      Never isolated: it was on in the v2 arms together with est_bump, so
-#                      WashFruitColander's rules-vs-base zero is the COMBINATION's zero. NOTE it
+#                      WashFruitColander's lang-steer-vs-base zero is the COMBINATION's zero. NOTE it
 #                      can raise est on the 600-step TurnOnSinkFaucet task, while its task-specific
-#                      wording rule deliberately uses no estimate lever. The combined tier keeps the
+#                      wording steer deliberately uses no estimate lever. The combined tier keeps the
 #                      floor: System2 normally predicts >=100 there, so it is usually a no-op.
 #
 # ORDER: rewrite text first, then let the physical recovery replace the turn when needed. The faucet
 # estimate explicitly declines a recovery turn, so its estimate cannot leak from the held faucet
 # action onto the injected re-grasp. Est proposals are still resolved once below.
-_GENERAL_RULES_CATALOG: tuple = (
-    _rule_press_again,
-    _rule_regrasp_recovery,
-    _rule_sink_faucet_est,
+_GENERAL_STEERS_CATALOG: tuple = (
+    _steer_press_again,
+    _steer_regrasp_recovery,
+    _steer_sink_faucet_est,
 )
 
 # Targeted ablation hook.  Empty/unset preserves the production stack byte-for-byte; a comma list
-# selects only those general rules, and ``none`` selects no general rule while still allowing the
+# selects only those general steers, and ``none`` selects no general steer while still allowing the
 # task-specific tier to be measured on its own.  This is deliberately resolved at import time so a
-# rollout process has one immutable registry, and rule_config() records the effective selection.
+# rollout process has one immutable registry, and lang_steer_config() records the effective selection.
 # It is an environment hook rather than another broad CLI tier because these arms are experiments,
 # not new production configurations.
-_GENERAL_RULE_ALLOWLIST_RAW = os.environ.get("SYS2_RULES_GENERAL_ALLOWLIST", "").strip()
-_GENERAL_RULE_NAMES = {
-    fn.__name__.removeprefix("_rule_"): fn for fn in _GENERAL_RULES_CATALOG
+_GENERAL_STEER_ALLOWLIST_RAW = os.environ.get("SYS2_LANG_STEER_GENERAL_ALLOWLIST", "").strip()
+_GENERAL_STEER_NAMES = {
+    fn.__name__.removeprefix("_steer_"): fn for fn in _GENERAL_STEERS_CATALOG
 }
-if not _GENERAL_RULE_ALLOWLIST_RAW:
-    _GENERAL_RULE_SELECTION = "all"
-    _GENERAL_RULES = _GENERAL_RULES_CATALOG
+if not _GENERAL_STEER_ALLOWLIST_RAW:
+    _GENERAL_STEER_SELECTION = "all"
+    _GENERAL_STEERS = _GENERAL_STEERS_CATALOG
 else:
     _requested = {
-        x.strip() for x in _GENERAL_RULE_ALLOWLIST_RAW.split(",") if x.strip()
+        x.strip() for x in _GENERAL_STEER_ALLOWLIST_RAW.split(",") if x.strip()
     }
     if _requested == {"none"}:
         _requested = set()
-    _unknown = sorted(_requested - set(_GENERAL_RULE_NAMES))
+    _unknown = sorted(_requested - set(_GENERAL_STEER_NAMES))
     if _unknown:
         raise ValueError(
-            "SYS2_RULES_GENERAL_ALLOWLIST contains unknown rule(s): "
+            "SYS2_LANG_STEER_GENERAL_ALLOWLIST contains unknown steer(s): "
             + ", ".join(_unknown)
             + "; choose from "
-            + ", ".join(sorted(_GENERAL_RULE_NAMES))
+            + ", ".join(sorted(_GENERAL_STEER_NAMES))
             + ", or use 'none'"
         )
-    _GENERAL_RULE_SELECTION = sorted(_requested)
-    _GENERAL_RULES = tuple(
-        fn for fn in _GENERAL_RULES_CATALOG
-        if fn.__name__.removeprefix("_rule_") in _requested
+    _GENERAL_STEER_SELECTION = sorted(_requested)
+    _GENERAL_STEERS = tuple(
+        fn for fn in _GENERAL_STEERS_CATALOG
+        if fn.__name__.removeprefix("_steer_") in _requested
     )
 
-# HORIZON POST-RULE: deliberately separate from the ordinary general tier. When enabled it ALWAYS
-# runs after mandatory, general, task-specific, and experimental execution rules. It may supersede
+# HORIZON POST-STEER: deliberately separate from the ordinary general tier. When enabled it ALWAYS
+# runs after mandatory, general, task-specific, and experimental execution steers. It may supersede
 # their terminal decision (not their normal behavior) by cancelling task_finish/max_cap and replaying
 # the final milestone until the evaluator consumes max_official_steps.
-_HORIZON_RULES: tuple = (_rule_final_milestone_retry,)
+_HORIZON_STEERS: tuple = (_steer_final_milestone_retry,)
 
 # =============================================================================================
 # GRADUATED: CloseToasterOvenDoor -- pin est to 100, and name the door HANDLE on a bare-door reach.
 #
-# MEASUREMENT (qwen3vl, 30 episodes, the manifest set, repeat_cap the only other rule active):
+# MEASUREMENT (qwen3vl, 30 episodes, the manifest set, repeat_cap the only other steer active):
 #     arm                       success   turns  steps/ep  push turns  4+ push loop
-#     v2 (full rule set)         19/30     5.2      611       4.23         13
+#     v2 (full steer set)         19/30     5.2      611       4.23         13
 #     base (repeat_cap only)     23/30     4.1      356       3.03          9
 #     + est pinned to 100        26/30     3.6      329       2.33          6
 #     + est 100 AND handle       28/30     3.0      257       1.93          3
@@ -2946,8 +2946,8 @@ _HORIZON_RULES: tuple = (_rule_final_milestone_retry,)
 # Monotone on ALL FIVE columns, and it lands exactly on the other planner's score with slightly
 # better mechanics. max_turns deaths went 11 -> 2 -> 0.
 #
-# WHY THIS TASK NEEDED A RULE AT ALL. It was the largest planner gap in the 1500-episode sweeps with
-# NO rule on either side (qwen35 28-29/30 vs qwen3vl 19-23/30). The failure is sharp: BOTH planners
+# WHY THIS TASK NEEDED A STEER AT ALL. It was the largest planner gap in the 1500-episode sweeps with
+# NO steer on either side (qwen35 28-29/30 vs qwen3vl 19-23/30). The failure is sharp: BOTH planners
 # succeed on every episode that needs <=3 push turns (qwen35 27/27, qwen3vl 17/17); the whole gap is
 # that qwen3vl reaches 4+ push turns 13 times vs 3 and converts 2/13. On the shared subgoal
 # "continue to push the toaster oven door closed" it ran 182 mean steps with 42% hitting budget,
@@ -2960,8 +2960,8 @@ _HORIZON_RULES: tuple = (_rule_final_milestone_retry,)
 # wins. Pinning removes the planner's estimate from the loop: of 272 recorded turns, 53% were raised
 # to 100 and 21% lowered.
 #
-# ASSIGN, NOT FLOOR -- and note this is the ONLY est rule here that assigns. It needs the est_assign
-# channel in apply_rules because est_proposal resolves as the largest and cannot lower. The risk was
+# ASSIGN, NOT FLOOR -- and note this is the ONLY est steer here that assigns. It needs the est_assign
+# channel in apply_lang_steer because est_proposal resolves as the largest and cannot lower. The risk was
 # stated before running: the lowered turns are mostly est 150 executing ~269 steps, i.e. using nearly
 # all of a 300-step budget, so pinning them to 100 truncates them. It still won, but
 # SYS2_CTOD_MODE=floor selects the safer raise-only variant if that ever looks load-bearing.
@@ -2997,7 +2997,7 @@ _CTOD_REACH_DOOR_RE = re.compile(
     r"^((?:continue\s+to\s+)?(?:reach|move)\s+(?:to|for)\s+.*\bdoor)\s*$", re.IGNORECASE)
 
 
-def _rule_ctod_reach_handle(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_ctod_reach_handle(task: str, plan: str, subgoal: str, est, state) -> dict:
     """CloseToasterOvenDoor: a reach naming only the door gets " handle" appended.
 
     Reaches ONLY. "push the toaster oven door closed" must not become "... door handle closed" -- the
@@ -3013,13 +3013,13 @@ def _rule_ctod_reach_handle(task: str, plan: str, subgoal: str, est, state) -> d
         return {}
     new = f"{m.group(1)} handle"
     return {"subgoal": new, "subgoal_detail": new,
-            "interventions": [{"rule": "ctod_reach_handle", "kind": "subgoal_override",
+            "interventions": [{"steer": "ctod_reach_handle", "kind": "subgoal_override",
                                "detail": "reach named only the door; name the HANDLE, which is what "
                                          "the other planner does 60/60 times on this task",
                                "before": raw, "after": new}]}
 
 
-def _rule_ctod_est_100(task: str, plan: str, subgoal: str, est, state) -> dict:
+def _steer_ctod_est_100(task: str, plan: str, subgoal: str, est, state) -> dict:
     """CloseToasterOvenDoor: est_length pinned to CTOD_EST (100) for EVERY subgoal.
 
     Deliberately not gated on the subgoal text: the erratic values are spread across the reach (rigid
@@ -3038,12 +3038,12 @@ def _rule_ctod_est_100(task: str, plan: str, subgoal: str, est, state) -> dict:
         if est > CTOD_EST:
             return {}
         return {"est_proposal": CTOD_EST,
-                "interventions": [{"rule": "ctod_est_100", "kind": "est_proposed",
+                "interventions": [{"steer": "ctod_est_100", "kind": "est_proposed",
                                    "detail": f"floor est at {CTOD_EST} (mode=floor): the planner's "
                                              f"{est} under-conditions a longer motion",
                                    "before": est, "after": CTOD_EST}]}
     return {"est_assign": CTOD_EST,
-            "interventions": [{"rule": "ctod_est_100", "kind": "est_assign",
+            "interventions": [{"steer": "ctod_est_100", "kind": "est_assign",
                                "detail": f"pin est to {CTOD_EST}: this planner's est for the task is "
                                          f"erratic (50/75/100/125/150) and uncorrelated with the "
                                          f"steps actually executed; {est} -> {CTOD_EST}",
@@ -3051,7 +3051,7 @@ def _rule_ctod_est_100(task: str, plan: str, subgoal: str, est, state) -> dict:
 
 
 # RETIRED -- measured at n=30 x TWO planners and shown to earn nothing. Functions kept above for the
-# record; deliberately absent from _TASK_RULES below, so re-enabling the task set does not revive them.
+# record; deliberately absent from _TASK_STEERS below, so re-enabling the task set does not revive them.
 #
 #   task                qwen35 v2 / base    qwen3vl v2 / base   net(60 eps)
 #   WeighIngredients        3/30  3/30          4/30  5/30          -1
@@ -3063,71 +3063,71 @@ def _rule_ctod_est_100(task: str, plan: str, subgoal: str, est, state) -> dict:
 #   wfc_skip_carry_continue  42 / 21 of 30 (qwen35),                4 / 2 (qwen3vl)
 #
 # WHY THEY GRADUATED AND THEN DID NOT REPRODUCE -- the same measurement error twice, worth knowing
-# before graduating anything else. Each was credited against the VERIFIED-RULES-ONLY arm rather than
-# against the no-rules baseline, and that reference happened to be a low outlier:
-#   WashFruitColander  baseline 9/20, verified-only 5/20, with rule 12/20 and 13/20  -> "+7" vs 5/20,
+# before graduating anything else. Each was credited against the VERIFIED-STEERS-ONLY arm rather than
+# against the no-lang-steer baseline, and that reference happened to be a low outlier:
+#   WashFruitColander  baseline 9/20, verified-only 5/20, with steer 12/20 and 13/20  -> "+7" vs 5/20,
 #                      but only ~+3 vs the 9/20 baseline
-#   WeighIngredients   baseline 4/20, verified-only 2/20, with rules 6/20            -> "+4" vs 2/20,
+#   WeighIngredients   baseline 4/20, verified-only 2/20, with steers 6/20            -> "+4" vs 2/20,
 #                      but only +2 vs the 4/20 baseline
 # Both apparent gains sit inside the +-4.5-episode (2SD) band this repo documents for n=20. JUDGE A
-# CANDIDATE AGAINST THE NO-RULES BASELINE, not against whatever the current rule stack happens to
+# CANDIDATE AGAINST THE NO-STEERS BASELINE, not against whatever the current steer stack happens to
 # score on that task.
 # Caveat kept honest: WashFruitColander also carries the text-gated sink_faucet_est (168 firings on
 # qwen35), which is on in v2 and off in base too, so its zero is the COMBINATION's zero -- the two
-# cannot be separated from these arms. wfc_skip_carry_continue is the only TASK-SPECIFIC rule there,
+# cannot be separated from these arms. wfc_skip_carry_continue is the only TASK-SPECIFIC steer there,
 # and it is the one being retired.
-_RETIRED_RULES = (_rule_wfc_skip_carry_continue,
-                  _rule_wi_extra_carry_turn, _rule_wi_reach_locate)
+_RETIRED_STEERS = (_steer_wfc_skip_carry_continue,
+                  _steer_wi_extra_carry_turn, _steer_wi_reach_locate)
 
-# TASK-SPECIFIC rules -- each gated on exactly one task (by name or a single-entry tuple).
-# NOTE the two per-task re-grasp copies are RETIRED: _rule_regrasp_recovery subsumes
+# TASK-SPECIFIC steers -- each gated on exactly one task (by name or a single-entry tuple).
+# NOTE the two per-task re-grasp copies are RETIRED: _steer_regrasp_recovery subsumes
 # drawer_regrasp_recovery and pil_regrasp_recovery via the width ladder.
-_TASK_RULES = (_rule_drawer_base_align, _rule_drawer_base_align_est,
-               _rule_strip_retract_plan, _rule_flag_retract_emitted,
-               _rule_microwave_est_bump,
-               _rule_mixer_est_floor, _rule_coffee_m2_est,
-               _rule_coffee_split_release, _rule_coffee_split_reach_grasp, _rule_coffee_grasp_est,
-               _rule_coffee_skip_failed,
-               _rule_skip_failed_regrasp, _rule_ppc2c_extra_carry, _rule_ppc2c_grasp_est,
-               _rule_gtb_reach_grasp, _rule_gtb_add_wait, _rule_gtb_skip_wait_cont,
-               _rule_gtb_wait_force_steps, _rule_gtb_slot_est,
-               _rule_pil_reach_continue,
+_TASK_STEERS = (_steer_drawer_base_align, _steer_drawer_base_align_est,
+               _steer_strip_retract_plan, _steer_flag_retract_emitted,
+               _steer_microwave_est_bump,
+               _steer_mixer_est_floor, _steer_coffee_m2_est,
+               _steer_coffee_split_release, _steer_coffee_split_reach_grasp, _steer_coffee_grasp_est,
+               _steer_coffee_skip_failed,
+               _steer_skip_failed_regrasp, _steer_ppc2c_extra_carry, _steer_ppc2c_grasp_est,
+               _steer_gtb_reach_grasp, _steer_gtb_add_wait, _steer_gtb_skip_wait_cont,
+               _steer_gtb_wait_force_steps, _steer_gtb_slot_est,
+               _steer_pil_reach_continue,
                # Order: rewrite the subgoal first so the est record is against the final text.
-               _rule_ctod_reach_handle, _rule_ctod_est_100)
+               _steer_ctod_reach_handle, _steer_ctod_est_100)
 
-# THE FINALISED SET: ordinary task-agnostic rules, graduated per-task rules, and the separately
-# switchable horizon post-rule.
+# THE FINALISED SET: ordinary task-agnostic steers, graduated per-task steers, and the separately
+# switchable horizon post-steer.
 #
-# It used to read `_GENERAL_RULES + _COFFEE_RULES + _GTB_RULES`, where those two tuples were
-# per-task SUBSETS of _TASK_RULES (the same function objects, not copies) assembled so a sweep could
-# measure "general + only this task's rules" and attribute the delta to that task alone. Both were
-# deleted with the experiments they served. They were also a footgun: `_GENERAL_RULES + _TASK_RULES +
-# _COFFEE_RULES + _GTB_RULES` would have run those 10 rules TWICE per turn, which is harmless for
+# It used to read `_GENERAL_STEERS + _COFFEE_STEERS + _GTB_STEERS`, where those two tuples were
+# per-task SUBSETS of _TASK_STEERS (the same function objects, not copies) assembled so a sweep could
+# measure "general + only this task's steers" and attribute the delta to that task alone. Both were
+# deleted with the experiments they served. They were also a footgun: `_GENERAL_STEERS + _TASK_STEERS +
+# _COFFEE_STEERS + _GTB_STEERS` would have run those 10 steers TWICE per turn, which is harmless for
 # est_proposal (resolved by max) but not for coffee_skip_failed / gtb_add_wait, which rewrite the plan
 # and carry per-episode state.
 #
 # sys2_steering_exp*.py is appended to this AFTER the loader below, so an experiment always sees the
-# checklist the verified rules produced.
+# checklist the verified steers produced.
 #
-# _RULES is the OPTIONAL set -- what --task-rules switches on. The mandatory tier is applied by
-# apply_rules regardless and is NOT in here, so that `--task-rules` off still gets repeat_cap.
-_RULES = _GENERAL_RULES + _TASK_RULES + _HORIZON_RULES
+# _STEERS is the OPTIONAL set -- what --task-lang-steer switches on. The mandatory tier is applied by
+# apply_lang_steer regardless and is NOT in here, so that `--task-lang-steer` off still gets repeat_cap.
+_STEERS = _GENERAL_STEERS + _TASK_STEERS + _HORIZON_STEERS
 
-# ---- PLAN-MODE rules -------------------------------------------------------------------------
-# apply_rules above runs on EXECUTION turns only. A rule that must replace the checklist System2
+# ---- PLAN-MODE steers -------------------------------------------------------------------------
+# apply_lang_steer above runs on EXECUTION turns only. A steer that must replace the checklist System2
 # produces in PLAN mode has no way in from there, because the plan call happens once before the
-# exec loop (combined_eval.do_plan_cold) and never passes through the rule layer.
+# exec loop (combined_eval.do_plan_cold) and never passes through the steer layer.
 #
 # These run exactly once per episode, on the plan-mode output. During execution the plan is then
 # maintained as usual -- System2's own plan_update marks progress and nothing re-forces the
-# checklist, so the marks stay System2's and no rule has to reconstruct them.
+# checklist, so the marks stay System2's and no steer has to reconstruct them.
 # GRADUATED (plan mode): StackBowlsCabinet -- force the stack-first checklist.
 #
 #   arm (same 20 episode ids)                              success
-#   baseline, no rules                                       7/20
-#   verified rules only                                      9/20
-#   with this rule, launch 1 (complete 20)                  16/20   <- see PROVENANCE below
-#   with this rule, launch 2 (16 completed of 19 attempted) 11/16
+#   baseline, no steers                                       7/20
+#   verified steers only                                      9/20
+#   with this steer, launch 1 (complete 20)                  16/20   <- see PROVENANCE below
+#   with this steer, launch 2 (16 completed of 19 attempted) 11/16
 #   one clean single-episode check (ep2, own label)           1/1
 #
 #   verifiable on disk (13/18)   vs baseline p=0.022   vs verified p=0.090
@@ -3136,12 +3136,12 @@ _RULES = _GENERAL_RULES + _TASK_RULES + _HORIZON_RULES
 # PROVENANCE, stated because it is not a clean 20/20: launch 1 and launch 2 ran under the SAME
 # RUN_LABEL, and without RESUME=1 a repeated label re-runs episodes and OVERWRITES their
 # episode.json -- so 19 of launch 1's files no longer exist and its 16/20 is not auditable from
-# disk. Launch 2 was then truncated (3 episodes killed mid-execution). The no-rules baseline
+# disk. Launch 2 was then truncated (3 episodes killed mid-execution). The no-lang-steer baseline
 # comparison is significant on the surviving data alone; the verified-arm comparison is not, and
 # depends on the overwritten launch. A same-code -ref control for this task was queued and
 # cancelled, so today's-code control is missing too.
 #
-# NO MECHANISM, and that is on the record: the rule's own diagnosis found 24 of 24 failures across
+# NO MECHANISM, and that is on the record: the steer's own diagnosis found 24 of 24 failures across
 # both reference runs are NOT planning failures -- the plan runs to completion, both bowls land in
 # the cabinet, and then 6-8 turns go to "continue to retract the arm" until max_turns while
 # env_success never latches. 5 of the 11 verified failures already ran this exact stack-first plan.
@@ -3156,7 +3156,7 @@ _RULES = _GENERAL_RULES + _TASK_RULES + _HORIZON_RULES
 SBC = "StackBowlsCabinet"
 # Milestones only, no fine steps -- the shape of every recorded cold plan on this task, so it is
 # in-distribution for the turn-0 prompt ("Unroll the current milestone into fine steps"). A
-# milestone without fine steps makes current_fine_id() -> None, so every EXECUTION rule degrades to
+# milestone without fine steps makes current_fine_id() -> None, so every EXECUTION steer degrades to
 # a no-op (repeat_cap takes its cap_declined branch) rather than corrupting anything.
 SBC_FORCED_PLAN = (
     "- [ ] M1: grasp the smaller bowl\n"
@@ -3166,41 +3166,41 @@ SBC_FORCED_PLAN = (
 )
 
 
-def _plan_rule_stackbowls_force(task: str, plan: str) -> dict:
+def _plan_steer_stackbowls_force(task: str, plan: str) -> dict:
     """StackBowlsCabinet, PLAN MODE: replace the cold plan with the stack-first checklist.
 
     Returns nothing when System2's plan is already byte-identical, so an episode that planned this
-    itself is recorded as untouched (``episode.json["plan"]["s2_plan_before_rules"]`` stays absent).
+    itself is recorded as untouched (``episode.json["plan"]["s2_plan_before_lang_steer"]`` stays absent).
     """
     if task != SBC:
         return {}
     if (plan or "").strip() == SBC_FORCED_PLAN:
         return {}
     return {"plan": SBC_FORCED_PLAN,
-            "interventions": [{"rule": "sbc_force_plan", "kind": "plan_mode_override",
+            "interventions": [{"steer": "sbc_force_plan", "kind": "plan_mode_override",
                                "detail": "forced the canonical stack-first 4-milestone checklist "
                                          "(stack on the counter, then carry the stack into the "
                                          "cabinet); execution then maintains it as usual",
                                "before": (plan or "").strip(), "after": SBC_FORCED_PLAN}]}
 
 
-# TASK-SPECIFIC, PLAN MODE. This is the plan-mode half of _TASK_RULES -- same contract (gated on
-# exactly one task), different hook. It cannot be merged into _TASK_RULES: these take (task, plan)
-# and run ONCE before the exec loop, while apply_rules calls its rules with five positional
-# arguments on every turn, so a plan rule in _TASK_RULES would raise TypeError on the first turn of
+# TASK-SPECIFIC, PLAN MODE. This is the plan-mode half of _TASK_STEERS -- same contract (gated on
+# exactly one task), different hook. It cannot be merged into _TASK_STEERS: these take (task, plan)
+# and run ONCE before the exec loop, while apply_lang_steer calls its steers with five positional
+# arguments on every turn, so a plan steer in _TASK_STEERS would raise TypeError on the first turn of
 # every task. The split is the call site, not the category.
-_TASK_PLAN_RULES: tuple = (_plan_rule_stackbowls_force,)
-_PLAN_RULES: tuple = _TASK_PLAN_RULES
+_TASK_PLAN_STEERS: tuple = (_plan_steer_stackbowls_force,)
+_PLAN_STEERS: tuple = _TASK_PLAN_STEERS
 
 
-def apply_plan_rules(task: str, *, plan: str) -> dict:
+def apply_plan_lang_steer(task: str, *, plan: str) -> dict:
     """Revise the PLAN-MODE checklist. Returns {plan, interventions}.
 
     ``interventions`` is empty when nothing fired -- byte-identical to not calling this at all.
     """
     cur = plan
     ivs: list[dict] = []
-    for fn in _PLAN_RULES + tuple(_EXP_PLAN_RULES):
+    for fn in _PLAN_STEERS + tuple(_EXP_PLAN_STEERS):
         r = fn(task, cur) or {}
         if r.get("interventions"):
             ivs.extend(r["interventions"])
@@ -3209,18 +3209,18 @@ def apply_plan_rules(task: str, *, plan: str) -> dict:
     return {"plan": cur, "interventions": ivs}
 
 
-# EXPERIMENTAL PATCH LAYER. Unverified per-task rules live in sys2_steering_exp*.py and are appended
+# EXPERIMENTAL PATCH LAYER. Unverified per-task steers live in sys2_steering_exp*.py and are appended
 # here. EVERY matching module is loaded, so parallel work on different tasks can each own a private
 # file (sys2_steering_exp_ArrangeTea.py, ...) instead of several editors clobbering one shared file --
-# which is how two CoffeeSetupMug rules were nearly lost. Deleting a file removes exactly its rules;
-# SYS2_RULES_NO_EXP=1 ignores them all without deleting anything.
+# which is how two CoffeeSetupMug steers were nearly lost. Deleting a file removes exactly its steers;
+# SYS2_LANG_STEER_NO_EXP=1 ignores them all without deleting anything.
 #
-# Loaded LAST so an experiment sees the checklist the verified rules produced. A broken or missing
+# Loaded LAST so an experiment sees the checklist the verified steers produced. A broken or missing
 # patch file must never break a real run, so each import failure is swallowed with a warning.
-_EXP_RULES: tuple = ()
-_EXP_PLAN_RULES: tuple = ()
-_EXP_RULE_TASKS: dict[str, tuple[str, ...]] = {}
-if not os.environ.get("SYS2_RULES_NO_EXP"):
+_EXP_STEERS: tuple = ()
+_EXP_PLAN_STEERS: tuple = ()
+_EXP_STEER_TASKS: dict[str, tuple[str, ...]] = {}
+if not os.environ.get("SYS2_LANG_STEER_NO_EXP"):
     import glob as _glob
     import importlib as _importlib
     import os.path as _osp
@@ -3228,136 +3228,136 @@ if not os.environ.get("SYS2_RULES_NO_EXP"):
         _mod = _osp.splitext(_osp.basename(_f))[0]
         try:
             _m = _importlib.import_module(_mod)
-            _EXP_RULES = _EXP_RULES + tuple(getattr(_m, "EXP_RULES", ()))
-            _EXP_PLAN_RULES = _EXP_PLAN_RULES + tuple(getattr(_m, "EXP_PLAN_RULES", ()))
-            # An exp file declares its rules' task scope by EXPORTING ``EXP_RULE_TASKS``; it cannot
-            # import _RULE_TASKS and poke it, because this loader runs BEFORE that dict is defined
+            _EXP_STEERS = _EXP_STEERS + tuple(getattr(_m, "EXP_STEERS", ()))
+            _EXP_PLAN_STEERS = _EXP_PLAN_STEERS + tuple(getattr(_m, "EXP_PLAN_STEERS", ()))
+            # An exp file declares its steers' task scope by EXPORTING ``EXP_STEER_TASKS``; it cannot
+            # import _STEER_TASKS and poke it, because this loader runs BEFORE that dict is defined
             # (attempting it raised "partially initialized module" and silently dropped the file's
-            # rules). Merged into _RULE_TASKS below so the scope self-check and the --task-rules help
-            # cover experimental rules too.
-            _EXP_RULE_TASKS.update(getattr(_m, "EXP_RULE_TASKS", {}) or {})
+            # steers). Merged into _STEER_TASKS below so the scope self-check and the --task-lang-steer help
+            # cover experimental steers too.
+            _EXP_STEER_TASKS.update(getattr(_m, "EXP_STEER_TASKS", {}) or {})
         except Exception as _e:  # a bad patch file must never break a real run
-            print(f"WARNING: experimental rules in {_mod} not loaded: {_e}", flush=True)
-    _RULES = _RULES + tuple(_EXP_RULES)
+            print(f"WARNING: experimental steers in {_mod} not loaded: {_e}", flush=True)
+    _STEERS = _STEERS + tuple(_EXP_STEERS)
 
-# The per-task tier as apply_rules selects it: graduated task rules plus the experimental patch layer
-# (every exp rule is gated on one task, so it belongs here and not in the general tier). _RULES stays
-# the union of every OPTIONAL rule, for introspection and the --task-rules help.
-_TASK_TIER_RULES: tuple = _TASK_RULES + tuple(_EXP_RULES)
+# The per-task tier as apply_lang_steer selects it: graduated task steers plus the experimental patch layer
+# (every exp steer is gated on one task, so it belongs here and not in the general tier). _STEERS stays
+# the union of every OPTIONAL steer, for introspection and the --task-lang-steer help.
+_TASK_TIER_STEERS: tuple = _TASK_STEERS + tuple(_EXP_STEERS)
 
-# Human-readable scope shown in the --task-rules CLI help. Derived, not hand-maintained: a hardcoded
+# Human-readable scope shown in the --task-lang-steer CLI help. Derived, not hand-maintained: a hardcoded
 # list went stale the moment the registry changed (it still said "<all: repeat_cap>" after the whole
-# task set was registered). Counts what --task-rules ADDS, per task, plus the plan-mode rules; the
+# task set was registered). Counts what --task-lang-steer ADDS, per task, plus the plan-mode steers; the
 # experimental patch layer is included, so a sys2_steering_exp*.py file shows up here too. The mandatory
 # tier is listed separately because it runs with or without the flag.
-def _tasks_with_rules() -> tuple[str, ...]:
+def _tasks_with_steers() -> tuple[str, ...]:
     per: dict[str, int] = {}
-    for fn in (*_RULES, *_PLAN_RULES, *_EXP_PLAN_RULES):
-        if fn in _GENERAL_RULES + _HORIZON_RULES:
+    for fn in (*_STEERS, *_PLAN_STEERS, *_EXP_PLAN_STEERS):
+        if fn in _GENERAL_STEERS + _HORIZON_STEERS:
             continue
-        for t in _RULE_TASKS.get(fn.__name__, ()):
+        for t in _STEER_TASKS.get(fn.__name__, ()):
             per[t] = per.get(t, 0) + 1
-    mand = ", ".join(f.__name__.removeprefix("_rule_") for f in _MANDATORY_RULES) or "none"
-    gen = ", ".join(f.__name__.removeprefix("_rule_") for f in _GENERAL_RULES) or "none"
-    horizon = ", ".join(f.__name__.removeprefix("_rule_") for f in _HORIZON_RULES) or "none"
+    mand = ", ".join(f.__name__.removeprefix("_steer_") for f in _MANDATORY_STEERS) or "none"
+    gen = ", ".join(f.__name__.removeprefix("_steer_") for f in _GENERAL_STEERS) or "none"
+    horizon = ", ".join(f.__name__.removeprefix("_steer_") for f in _HORIZON_STEERS) or "none"
     return (f"<always on, no flag needed: {mand}>",
             f"<+general, task-agnostic: {gen}>",
-            f"<+horizon post-rule, independently switchable: {horizon}>",
+            f"<+horizon post-steer, independently switchable: {horizon}>",
             *(f"{t} ({n})" for t, n in sorted(per.items())))
 
 
-# Which task(s) each non-general rule is gated on. Kept beside the registries so it is obvious when a
-# new rule is added and forgotten here -- the self-check below fails loudly in that case.
-_RULE_TASKS: dict[str, tuple[str, ...]] = {
-    "_rule_drawer_base_align": _DRAWER_ALIGN_TASKS,
-    "_rule_drawer_base_align_est": _DRAWER_ALIGN_TASKS,
-    "_rule_strip_retract_plan": _STRIP_RETRACT_TASKS,
-    "_rule_flag_retract_emitted": _STRIP_RETRACT_TASKS,
-    "_rule_microwave_est_bump": ("TurnOnMicrowave",),
-    "_rule_mixer_est_floor": ("OpenStandMixerHead",),
-    "_rule_coffee_m2_est": (COFFEE,),
-    "_rule_coffee_split_release": (COFFEE,),
-    "_rule_coffee_split_reach_grasp": (COFFEE,),
-    "_rule_coffee_grasp_est": (COFFEE,),
-    "_rule_coffee_skip_failed": (COFFEE,),
-    "_rule_skip_failed_regrasp": SKIP_FAILED_TASKS,
-    "_rule_ppc2c_extra_carry": (PPC2C,),
-    "_rule_ppc2c_grasp_est": (PPC2C,),
-    "_rule_gtb_reach_grasp": (GTB,),
-    "_rule_gtb_add_wait": (GTB,),
-    "_rule_gtb_skip_wait_cont": (GTB,),
-    "_rule_gtb_wait_force_steps": (GTB,),
-    "_rule_gtb_slot_est": (GTB,),
-    "_rule_pil_reach_continue": (PIL,),
-    "_rule_ctod_reach_handle": (CTOD,),
-    "_rule_ctod_est_100": (CTOD,),
-    "_plan_rule_stackbowls_force": (SBC,),
+# Which task(s) each non-general steer is gated on. Kept beside the registries so it is obvious when a
+# new steer is added and forgotten here -- the self-check below fails loudly in that case.
+_STEER_TASKS: dict[str, tuple[str, ...]] = {
+    "_steer_drawer_base_align": _DRAWER_ALIGN_TASKS,
+    "_steer_drawer_base_align_est": _DRAWER_ALIGN_TASKS,
+    "_steer_strip_retract_plan": _STRIP_RETRACT_TASKS,
+    "_steer_flag_retract_emitted": _STRIP_RETRACT_TASKS,
+    "_steer_microwave_est_bump": ("TurnOnMicrowave",),
+    "_steer_mixer_est_floor": ("OpenStandMixerHead",),
+    "_steer_coffee_m2_est": (COFFEE,),
+    "_steer_coffee_split_release": (COFFEE,),
+    "_steer_coffee_split_reach_grasp": (COFFEE,),
+    "_steer_coffee_grasp_est": (COFFEE,),
+    "_steer_coffee_skip_failed": (COFFEE,),
+    "_steer_skip_failed_regrasp": SKIP_FAILED_TASKS,
+    "_steer_ppc2c_extra_carry": (PPC2C,),
+    "_steer_ppc2c_grasp_est": (PPC2C,),
+    "_steer_gtb_reach_grasp": (GTB,),
+    "_steer_gtb_add_wait": (GTB,),
+    "_steer_gtb_skip_wait_cont": (GTB,),
+    "_steer_gtb_wait_force_steps": (GTB,),
+    "_steer_gtb_slot_est": (GTB,),
+    "_steer_pil_reach_continue": (PIL,),
+    "_steer_ctod_reach_handle": (CTOD,),
+    "_steer_ctod_est_100": (CTOD,),
+    "_plan_steer_stackbowls_force": (SBC,),
     # Experimental patch layer (sys2_steering_exp*.py).
-    "_rule_tosf_force_plan": ("TurnOnSinkFaucet",),
+    "_steer_tosf_force_plan": ("TurnOnSinkFaucet",),
 }
 
-# Scopes declared by experimental patch files (EXP_RULE_TASKS). setdefault, so an exp file can never
-# silently redefine the scope of a graduated rule.
-for _rn, _rt in _EXP_RULE_TASKS.items():
-    _RULE_TASKS.setdefault(_rn, tuple(_rt))
+# Scopes declared by experimental patch files (EXP_STEER_TASKS). setdefault, so an exp file can never
+# silently redefine the scope of a graduated steer.
+for _rn, _rt in _EXP_STEER_TASKS.items():
+    _STEER_TASKS.setdefault(_rn, tuple(_rt))
 
-# SELF-CHECK: every registered non-general rule must be accounted for above, so the --task-rules help
+# SELF-CHECK: every registered non-general steer must be accounted for above, so the --task-lang-steer help
 # and any per-task audit cannot silently drift from the registry.
 _UNMAPPED = sorted(
     fn.__name__
-    for fn in (*_RULES, *_PLAN_RULES, *_EXP_PLAN_RULES)
-    if fn not in _GENERAL_RULES + _HORIZON_RULES + _MANDATORY_RULES
-    and fn.__name__ not in _RULE_TASKS
+    for fn in (*_STEERS, *_PLAN_STEERS, *_EXP_PLAN_STEERS)
+    if fn not in _GENERAL_STEERS + _HORIZON_STEERS + _MANDATORY_STEERS
+    and fn.__name__ not in _STEER_TASKS
 )
 if _UNMAPPED:
-    print(f"WARNING: sys2_steering._RULE_TASKS is missing {len(_UNMAPPED)} registered rule(s): "
-          f"{', '.join(_UNMAPPED)} -- add them so --task-rules reports the real scope", flush=True)
+    print(f"WARNING: sys2_steering._STEER_TASKS is missing {len(_UNMAPPED)} registered steer(s): "
+          f"{', '.join(_UNMAPPED)} -- add them so --task-lang-steer reports the real scope", flush=True)
 
-TASKS_WITH_RULES = _tasks_with_rules()
+TASKS_WITH_STEERS = _tasks_with_steers()
 
 
-def rule_config(*, general: bool, task_tier: bool,
+def lang_steer_config(*, general: bool, task_tier: bool,
                 last_milestone_retry: bool | None = None) -> dict:
-    """Serializable description of the exact rule tiers selected for one evaluation run."""
+    """Serializable description of the exact steer tiers selected for one evaluation run."""
     mandatory = bool(_MANDATORY_ON)
     horizon_retry = bool(general) if last_milestone_retry is None else bool(last_milestone_retry)
 
     def names(fns) -> list[str]:
-        return [fn.__name__.removeprefix("_rule_").removeprefix("_plan_rule_") for fn in fns]
+        return [fn.__name__.removeprefix("_steer_").removeprefix("_plan_steer_") for fn in fns]
 
     return {
         "schema_version": 2,
-        # Incremented when rule behaviour changes without changing the config schema. This prevents
-        # old and behaviorally distinct rule results from looking like the same evaluation arm.
+        # Incremented when steer behaviour changes without changing the config schema. This prevents
+        # old and behaviorally distinct steer results from looking like the same evaluation arm.
         "behavior_version": 10,
         "regrasp_recovery_version": "offset2-replay-v1",
         "final_milestone_retry_version": "official-step-loop-v7",
         "final_milestone_retry_max": FINAL_MILESTONE_RETRY_MAX,
         "final_milestone_retry_unlimited": FINAL_MILESTONE_RETRY_MAX == 0,
-        "general_rule_selection": _GENERAL_RULE_SELECTION,
-        "mandatory_rules": mandatory,
-        "general_rules": bool(general),
-        "task_rules": bool(task_tier),
+        "general_steer_selection": _GENERAL_STEER_SELECTION,
+        "mandatory_lang_steer": mandatory,
+        "general_lang_steer": bool(general),
+        "task_lang_steer": bool(task_tier),
         "last_milestone_retry": horizon_retry,
-        "active_rules": {
-            "mandatory": names(_MANDATORY_RULES) if mandatory else [],
-            "general": names(_GENERAL_RULES) if general else [],
-            "task": names(_TASK_TIER_RULES) if task_tier else [],
-            "horizon_post": names(_HORIZON_RULES) if horizon_retry else [],
-            "task_plan": names(_PLAN_RULES + tuple(_EXP_PLAN_RULES)) if task_tier else [],
-            "task_action": ["action_override"] if task_tier and _task_rules_active() else [],
+        "active_steers": {
+            "mandatory": names(_MANDATORY_STEERS) if mandatory else [],
+            "general": names(_GENERAL_STEERS) if general else [],
+            "task": names(_TASK_TIER_STEERS) if task_tier else [],
+            "horizon_post": names(_HORIZON_STEERS) if horizon_retry else [],
+            "task_plan": names(_PLAN_STEERS + tuple(_EXP_PLAN_STEERS)) if task_tier else [],
+            "task_action": ["action_override"] if task_tier and _task_lang_steer_active() else [],
         },
     }
 
 
-def apply_rules(task: str, *, plan: str, subgoal: str, subgoal_detail: str, est,
+def apply_lang_steer(task: str, *, plan: str, subgoal: str, subgoal_detail: str, est,
                 state: dict | None = None, general: bool = True, task_tier: bool = True,
                 task_status: str | None = None,
                 last_milestone_retry: bool | None = None) -> dict:
     """Revise one turn's System2 output. Returns what the caller should actually use.
 
     ``general`` / ``task_tier`` select the TIERS, giving the three arms the CLI exposes:
-        neither                  mandatory only (repeat_cap) -- the "no rules" arm. The loop still
+        neither                  mandatory only (repeat_cap) -- the "no steers" arm. The loop still
                                  has a way out of a repeated subgoal, but nothing revises System2.
         general                  + the task-agnostic tier
         general and task_tier    + the per-task tier and the sys2_steering_exp*.py patch layer
@@ -3369,7 +3369,7 @@ def apply_rules(task: str, *, plan: str, subgoal: str, subgoal_detail: str, est,
     ``interventions`` is empty when nothing fired.
     """
     st = state if state is not None else {}
-    # Ephemeral inputs for rules whose decision depends on the real environment status or on the
+    # Ephemeral inputs for steers whose decision depends on the real environment status or on the
     # full System2 phrasing. Assign every call so neither value can leak from a previous turn.
     st["_current_task_status"] = task_status
     st["_current_subgoal_detail"] = subgoal_detail
@@ -3377,15 +3377,15 @@ def apply_rules(task: str, *, plan: str, subgoal: str, subgoal_detail: str, est,
     st["_current_effective_est"] = est
     # Reset the same-pass repeat-cap signal so it can never leak from an earlier turn.
     st["_repeat_cap_max_cap"] = False
-    # Ephemeral coordination flag: later rules may need to know that THIS turn was replaced by a
+    # Ephemeral coordination flag: later steers may need to know that THIS turn was replaced by a
     # physical re-grasp. Reset on every application so a hit never leaks into the following turn.
     st["regrasp_recovery_hit"] = False
-    # tx_label marks a turn a rule INJECTED rather than one System2 asked for -- "tx_sg_failed" for a
+    # tx_label marks a turn a steer INJECTED rather than one System2 asked for -- "tx_sg_failed" for a
     # recovery after a detected failure, "tx_sg_incomplete" for a continuation. Recorded per turn so
     # the GUI track can tell the two apart.
-    # force_steps: an exact segment length that overrides BOTH the stop rule and --max-steps-cap
+    # force_steps: an exact segment length that overrides BOTH the stop criterion and --max-steps-cap
     # (combined_eval.run_s1_segment). 0 = untouched. Unlike est, it is taken as-is rather than
-    # resolved against other proposals: it is an explicit "run exactly this long", so the LAST rule
+    # resolved against other proposals: it is an explicit "run exactly this long", so the LAST steer
     # to set it wins and there is nothing to reconcile.
     cur = {"plan": plan, "subgoal": subgoal, "subgoal_detail": subgoal_detail, "est": est,
            "skip_s1": False, "tx_label": None, "force_steps": 0,
@@ -3395,17 +3395,17 @@ def apply_rules(task: str, *, plan: str, subgoal: str, subgoal_detail: str, est,
     est_assign = None          # exact assignment (see the est_assign block at the end)
     est_assign_by = None
     # Mandatory tier FIRST, so repeat_cap sees System2's own text and its cap counters are identical
-    # whether or not the optional layer is on -- that is what keeps a rules arm comparable with its
-    # no-rules control. (_MANDATORY_ON exists only to reproduce the pre-tier zero-rules baseline.)
-    # final_milestone_retry is a POST rule. In particular, CoffeeSetupMug can turn a bare pending
+    # whether or not the optional layer is on -- that is what keeps a steers arm comparable with its
+    # no-lang-steer control. (_MANDATORY_ON exists only to reproduce the pre-tier zero-lang-steer baseline.)
+    # final_milestone_retry is a POST steer. In particular, CoffeeSetupMug can turn a bare pending
     # final milestone into a detailed active milestone; checkpointing before that rewrite misses the
     # only instant when its first fine step is [~]. Run every task/experimental rewrite first, then
     # snapshot or trigger the terminal retry against the actual plan System1 is about to execute.
     horizon_retry = bool(general) if last_milestone_retry is None else bool(last_milestone_retry)
-    horizon_post = _HORIZON_RULES if horizon_retry else ()
-    active = ((_MANDATORY_RULES if _MANDATORY_ON else ())
-              + (_GENERAL_RULES if general else ())
-              + (_TASK_TIER_RULES if task_tier else ())
+    horizon_post = _HORIZON_STEERS if horizon_retry else ()
+    active = ((_MANDATORY_STEERS if _MANDATORY_ON else ())
+              + (_GENERAL_STEERS if general else ())
+              + (_TASK_TIER_STEERS if task_tier else ())
               + horizon_post)
     for fn in active:
         st["_current_effective_subgoal_detail"] = cur["subgoal_detail"]
@@ -3415,15 +3415,15 @@ def apply_rules(task: str, *, plan: str, subgoal: str, subgoal_detail: str, est,
         ivs.extend(r.get("interventions", []))
         if r.get("est_assign") is not None:
             est_assign = int(r["est_assign"])
-            est_assign_by = (r["interventions"][0]["rule"] if r.get("interventions") else None)
+            est_assign_by = (r["interventions"][0]["steer"] if r.get("interventions") else None)
         if "est_proposal" in r:
-            # Collected, NOT applied: several rules may propose an est for the same turn (a
+            # Collected, NOT applied: several steers may propose an est for the same turn (a
             # task-specific one and the universal bucket bump), and applying them in sequence would
-            # CHAIN -- the faucet rule's 100 would then be bumped again to 125, which is neither
+            # CHAIN -- the faucet steer's 100 would then be bumped again to 125, which is neither
             # proposal. They are resolved once, below, by taking the largest.
-            est_proposals.append((r["est_proposal"], r["interventions"][0]["rule"]
+            est_proposals.append((r["est_proposal"], r["interventions"][0]["steer"]
                                   if r.get("interventions") else "?"))
-        # Expose the estimate that would win if the rule pass ended here to POST rules. This keeps
+        # Expose the estimate that would win if the steer pass ended here to POST steers. This keeps
         # the final-milestone checkpoint identical to what System1 will receive even when a task
         # rewrite (CoffeeSetupMug) uses est_assign, whose public resolution happens below.
         if est_assign is not None:
@@ -3438,37 +3438,37 @@ def apply_rules(task: str, *, plan: str, subgoal: str, subgoal_detail: str, est,
         if cur["skip_s1"]:
             break            # nothing else applies to a turn that runs no segment
     # EST RESOLUTION: largest of System2's own estimate and every proposal. "Whichever is larger"
-    # is the rule because a larger est_length conditions System1 to move slower, i.e. more
+    # is the steer because a larger est_length conditions System1 to move slower, i.e. more
     # precisely -- so between a task-specific value and the universal bump, the bigger one is the
     # stronger version of the same intent. All proposals are computed from System2's ORIGINAL est,
-    # so the order rules run in cannot change the outcome.
+    # so the order steers run in cannot change the outcome.
     if est_proposals:
         base = est if isinstance(est, int) else 0
         best, who = max(est_proposals, key=lambda pr: pr[0])
         if best > base:
             cur["est"] = best
             names = "+".join(sorted({w for _, w in est_proposals}))
-            ivs.append({"rule": "est_resolve", "kind": "est_override",
+            ivs.append({"steer": "est_resolve", "kind": "est_override",
                         "detail": f"largest of {sorted({p for p, _ in est_proposals})} "
                                   f"proposed by {names}" + (f"; winner {who}"
                                                             if len(est_proposals) > 1 else ""),
                         "before": est, "after": best})
     # EST ASSIGNMENT, applied AFTER the resolution above and therefore able to LOWER est -- which
     # est_proposal deliberately cannot do (it resolves as the largest, so a proposal can only raise).
-    # A rule returns est_assign only when it means "this subgoal takes exactly N steps, whatever
+    # A steer returns est_assign only when it means "this subgoal takes exactly N steps, whatever
     # System2 guessed", e.g. pinning a task whose planner emits an erratic est. Use sparingly: the
-    # graduated est rules are all floors, because a floor can never truncate a segment that was
+    # graduated est steers are all floors, because a floor can never truncate a segment that was
     # legitimately given a long budget, and an assignment can.
-    # LAST WRITER WINS if two rules assign; they would be contradicting each other outright, so
-    # there is nothing to reconcile and the ordering of _RULES decides.
-    # Record it here ONLY if the rule did not already log its own est_assign entry -- otherwise one
-    # action appears twice in the audit and every per-rule count is inflated. (est_proposal is
-    # different on purpose: the rule logs the PROPOSAL and this block logs the RESOLUTION, which are
-    # two distinct facts because several rules can propose.)
+    # LAST WRITER WINS if two steers assign; they would be contradicting each other outright, so
+    # there is nothing to reconcile and the ordering of _STEERS decides.
+    # Record it here ONLY if the steer did not already log its own est_assign entry -- otherwise one
+    # action appears twice in the audit and every per-steer count is inflated. (est_proposal is
+    # different on purpose: the steer logs the PROPOSAL and this block logs the RESOLUTION, which are
+    # two distinct facts because several steers can propose.)
     _already = any(i.get("kind") == "est_assign" for i in ivs)
     if est_assign is not None and est_assign != cur["est"]:
         if not _already:
-            ivs.append({"rule": est_assign_by or "est_assign", "kind": "est_assign",
+            ivs.append({"steer": est_assign_by or "est_assign", "kind": "est_assign",
                     "detail": f"est ASSIGNED to {est_assign} (overrides System2's {est} and any "
                                   "floor proposed above); this can lower est, unlike est_proposal",
                         "before": cur["est"], "after": est_assign})
@@ -3490,14 +3490,14 @@ def pending_resume(state: dict | None) -> dict | None:
     """The next queued recovery/resume subgoal to run without querying System2.
 
     Called by the rollout loop at the TOP of a turn, before the System2 call. Returns
-    ``{"key", "rule", "subgoal", "subgoal_detail", "est"}``. Ordinarily this consumes the held
+    ``{"key", "steer", "subgoal", "subgoal_detail", "est"}``. Ordinarily this consumes the held
     subgoal once. Offset+2 regrasp recovery may prepend the intervening executed motion; that replay
     is returned first while the original held S2 action remains pending for the following turn.
 
-    The rule's own ``<key>_held`` slot is cleared only when the final held S2 action is returned, so
+    The steer's own ``<key>_held`` slot is cleared only when the final held S2 action is returned, so
     its tx_resume branch cannot run it twice after the queue drains.
 
-    Returns None when no rule borrowed the previous turn -- the ordinary path, where the loop queries
+    Returns None when no steer borrowed the previous turn -- the ordinary path, where the loop queries
     System2 as usual.
     """
     if not state:
@@ -3510,7 +3510,7 @@ def pending_resume(state: dict | None) -> dict | None:
         item = queued.pop(0)
         if not queued:
             pend.pop("before_resume", None)
-        return {"key": pend["key"], "rule": pend["rule"], **item}
+        return {"key": pend["key"], "steer": pend["steer"], **item}
     state.pop("_resume_pending", None)
     state.pop(f"{pend['key']}_held", None)
     pend.pop("_injection_credit_key", None)

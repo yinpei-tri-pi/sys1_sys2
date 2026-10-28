@@ -52,7 +52,7 @@ h1 { font-size: 15px; margin: 0; } h2 { font-size: 13px; margin: 0 0 8px; color:
 .icon-bad::before { content: "✗"; color: var(--critical); font-weight: 700; margin-right: 3px; }
 .pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 9px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface-2); font-size: 12px; font-weight: 600; }
-.pill.rule::before { content: "▲"; color: var(--warning); font-size: 10px; }
+.pill.steer::before { content: "▲"; color: var(--warning); font-size: 10px; }
 button, select { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-2);
   border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
 .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px;
@@ -65,7 +65,7 @@ button, select { font: inherit; font-size: 13px; color: var(--text-primary); bac
 .seg:first-child { border-radius: 4px 0 0 4px; }
 .seg.last { border-radius: 0 4px 4px 0; }
 .seg.cur { background: var(--series-1-strong); }
-.seg.has-rule::after { content: "▲"; position: absolute; top: -13px; left: 50%; transform: translateX(-50%);
+.seg.has-steer::after { content: "▲"; position: absolute; top: -13px; left: 50%; transform: translateX(-50%);
   color: var(--warning); font-size: 9px; }
 .playhead { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text-primary);
   pointer-events: none; }
@@ -141,7 +141,7 @@ async function loadSummary() {
       html += `<div class="task"><div class="task-row"><span>${esc(t.task)}</span><span class="rate">${t.n_success}/${t.n} · ${p}%</span></div>
         <div class="meter" role="meter" aria-valuenow="${p}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(t.task)} success rate"><i style="width:${p}%"></i></div>
         <div class="trials">${t.episodes.map(e => `<button class="trial ${e.success ? "icon-ok" : "icon-bad"}" data-key="${esc(e.key)}"
-          aria-label="trial ${e.trial} ${e.success ? "success" : "failure"}" title="${esc(e.termination || "")} · ${e.steps}/${e.horizon} steps · ${e.turns} turns${e.rules ? " · " + e.rules + " language-steering interventions" : ""}">#${e.trial} ${e.steps ?? ""}</button>`).join("")}</div></div>`;
+          aria-label="trial ${e.trial} ${e.success ? "success" : "failure"}" title="${esc(e.termination || "")} · ${e.steps}/${e.horizon} steps · ${e.turns} turns${e.steers ? " · " + e.steers + " language-steering interventions" : ""}">#${e.trial} ${e.steps ?? ""}</button>`).join("")}</div></div>`;
     }
   }
   $("#tasks").innerHTML = html || `<div class="empty" style="padding:16px">No episodes yet.</div>`;
@@ -163,14 +163,14 @@ async function openEpisode(key) {
 
 function ivHtml(iv) {
   const ba = iv.before !== undefined ? `<div class="muted">${esc(iv.before)} → <b>${esc(iv.after)}</b></div>` : "";
-  return `<div class="iv"><b>${esc(iv.rule)}</b> <span class="muted">[${esc(iv.kind)}]</span><div>${esc(iv.detail || "")}</div>${ba}</div>`;
+  return `<div class="iv"><b>${esc(iv.steer)}</b> <span class="muted">[${esc(iv.kind)}]</span><div>${esc(iv.detail || "")}</div>${ba}</div>`;
 }
 
 function renderEpisode() {
   const e = EP, horizon = e.horizon || e.steps || 1;
   const playable = e.turns.filter(t => t.s1_video);
   const status = e.success ? `<span class="pill icon-ok ok">Success</span>` : `<span class="pill icon-bad bad">Failure</span>`;
-  const segs = e.turns.filter(t => t.s1_steps).map((t, i, a) => `<button class="seg${i === a.length - 1 ? " last" : ""}${t.interventions.length ? " has-rule" : ""}"
+  const segs = e.turns.filter(t => t.s1_steps).map((t, i, a) => `<button class="seg${i === a.length - 1 ? " last" : ""}${t.interventions.length ? " has-steer" : ""}"
       style="width:${100 * t.s1_steps / horizon}%" data-turn="${t.turn}"
       aria-label="turn ${t.turn}: ${esc(t.subgoal)}, steps ${t.step_start} to ${t.step_start + t.s1_steps}"></button>`).join("");
   $("#main").innerHTML = `
@@ -178,8 +178,10 @@ function renderEpisode() {
       <div class="title">${esc(e.instruction)}</div>
       <div class="meta">${status}<span>${esc(e.task)} · trial ${esc(e.trial)}</span>
         <span>${esc(e.termination)}</span><span class="rate">${e.steps} / ${horizon} env steps</span>
-        <span>${e.n_turns} System2 turns</span>${e.n_rule_interventions ? `<span class="pill rule">${e.n_rule_interventions} language-steering interventions</span>` : ""}
-        <span class="muted">${e.seconds ?? "?"} s wall</span></div>
+        <span>${e.n_turns} System2 turns</span>${e.n_lang_steer_interventions ? `<span class="pill steer">${e.n_lang_steer_interventions} language-steering interventions</span>` : ""}
+        <span class="muted">${e.seconds ?? "?"} s wall</span>
+        <a href="/rollout?method=${encodeURIComponent(e.key.split("/")[0])}&ep=${encodeURIComponent(e.key.split("/").slice(1).join("/"))}"
+           target="_blank" title="every System2 turn beside its System1 segment: step-synced video, progress/action/gripper curves, action chunks">open in rollout inspector ↗</a></div>
       ${e.error ? `<pre class="bad">${esc(e.error)}</pre>` : ""}
       <div class="timeline" id="timeline">${segs}<div class="playhead" id="playhead" style="left:0"></div></div>
       <div class="axis"><span>0</span><span>step budget (official horizon) ${horizon}</span></div>
@@ -206,14 +208,14 @@ function renderEpisode() {
     </div>
     <h2 style="margin:20px 0 10px">Turns: System2 decision → System1 segment</h2>
     ${e.turns.map(turnHtml).join("")}
-    <div class="muted" style="font-size:12px">${esc(e.reset_mode || "")} · language steering: ${esc(e.rule_tier || "")}</div>`;
+    <div class="muted" style="font-size:12px">${esc(e.reset_mode || "")} · language steering: ${esc(e.lang_steer_tier || "")}</div>`;
   bindEpisode();
   const first = e.turns.findIndex(t => t.s1_video);
   setTurn(first < 0 ? 0 : first, false);
 }
 
 function turnHtml(t, i) {
-  const held = t.held_by_rule ? `<div class="iv"><b>System2 not queried</b>: turn held by language steering <b>${esc(t.held_by_rule)}</b> (replays a cached subgoal)</div>` : "";
+  const held = t.held_by_steer ? `<div class="iv"><b>System2 not queried</b>: turn held by language steering <b>${esc(t.held_by_steer)}</b> (replays a cached subgoal)</div>` : "";
   const s2in = t.s2_input_video ? `<video src="${file(t.s2_input_video)}" muted loop playsinline controls preload="metadata"></video><div class="kv">clip of the previous segment (4 fps)</div>`
     : t.s2_input_image ? `<div class="media"><img src="${file(t.s2_input_image)}" alt="scene System2 saw"></div><div class="kv">current scene</div>` : `<div class="muted">—</div>`;
   const priv = t.privileged || {};
@@ -222,7 +224,7 @@ function turnHtml(t, i) {
     <div class="turn-head"><span class="n">Turn ${t.turn}</span>
       <span class="s rate">steps ${t.step_start}–${t.step_start + t.s1_steps} (${t.s1_steps})</span>
       ${t.judge ? `<span class="pill">${esc(t.judge)}</span>` : ""}
-      ${t.interventions.length ? `<span class="pill rule">${t.interventions.length} steering</span>` : ""}
+      ${t.interventions.length ? `<span class="pill steer">${t.interventions.length} steering</span>` : ""}
       ${t.s1_video ? `<button data-seek="${i}">▶ play from here</button>` : ""}</div>
     <div class="cols">
       <div class="col"><h3>System2 saw</h3>${s2in}</div>
@@ -248,7 +250,7 @@ function setTurn(i, autoplay) {
   document.querySelectorAll(".seg").forEach(s => s.classList.toggle("cur", +s.dataset.turn === t.turn));
   $("#caption").innerHTML = `<div class="sub">Turn ${t.turn} of ${EP.turns.length} · System2 → System1</div>
     <div class="sg">${esc(t.subgoal || "—")}</div>
-    <div class="sub">judge (previous segment): ${esc(t.judge || "—")} · estimated ${esc(t.estimated_step ?? "—")} steps · System1 ran ${t.s1_steps} · stop: ${esc(t.s1_stop || "—")}${t.interventions.length ? ` · ▲ steering: ${esc(t.interventions.map(v => v.rule).join(", "))}` : ""}</div>`;
+    <div class="sub">judge (previous segment): ${esc(t.judge || "—")} · estimated ${esc(t.estimated_step ?? "—")} steps · System1 ran ${t.s1_steps} · stop: ${esc(t.s1_stop || "—")}${t.interventions.length ? ` · ▲ steering: ${esc(t.interventions.map(v => v.steer).join(", "))}` : ""}</div>`;
   const v = $("#video");
   if (v && t.s1_video) {
     v.poster = t.anchor ? file(t.anchor) : "";  // the segment's first frame, until it plays
@@ -289,7 +291,7 @@ function bindEpisode() {
   document.querySelectorAll(".seg").forEach(s => {
     const i = EP.turns.findIndex(t => t.turn === +s.dataset.turn), t = EP.turns[i];
     const show = (x, y) => {
-      tip.innerHTML = `<b>Turn ${t.turn}</b> · steps ${t.step_start}–${t.step_start + t.s1_steps}<br>${esc(t.subgoal)}<br><span style="color:var(--text-secondary)">judge: ${esc(t.judge || "—")} · stop: ${esc(t.s1_stop || "—")}${t.interventions.length ? `<br>▲ ${esc(t.interventions.map(v => v.rule).join(", "))}` : ""}</span>`;
+      tip.innerHTML = `<b>Turn ${t.turn}</b> · steps ${t.step_start}–${t.step_start + t.s1_steps}<br>${esc(t.subgoal)}<br><span style="color:var(--text-secondary)">judge: ${esc(t.judge || "—")} · stop: ${esc(t.s1_stop || "—")}${t.interventions.length ? `<br>▲ ${esc(t.interventions.map(v => v.steer).join(", "))}` : ""}</span>`;
       tip.style.display = "block"; tip.style.left = Math.min(x + 12, innerWidth - 360) + "px"; tip.style.top = (y + 14) + "px";
     };
     s.onmousemove = ev => show(ev.clientX, ev.clientY);

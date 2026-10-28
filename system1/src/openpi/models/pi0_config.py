@@ -39,7 +39,7 @@ class Pi0Config(_model.BaseModelConfig):
     # ("anchor_scene_left","anchor_scene_right","anchor_wrist").
     image_keys: tuple[str, ...] | None = None
     # Cameras that receive geometric augmentation (crop+rotate). If None, falls back
-    # to the legacy rule (geom aug iff "wrist" not in key). Anchor views are
+    # to the legacy behavior (geom aug iff "wrist" not in key). Anchor views are
     # deliberately excluded so the before/after geometry stays stable.
     geometric_aug_cameras: tuple[str, ...] | None = None
     # Add anchor (before) image groups + a learned anchor/current role embedding.

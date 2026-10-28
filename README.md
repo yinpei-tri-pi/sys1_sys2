@@ -1,207 +1,214 @@
-# sys1_sys2 — RoboCasa365 evaluation of the System2 + System1 hierarchy
+# sys1_sys2: RoboCasa365 evaluation of a System2 + System1 policy
 
-Evaluation-only package for a dual-system policy on the
-[RoboCasa365 leaderboard](https://github.com/robocasa-benchmark/leaderboard) protocol:
+Evaluation-only package for a hierarchical policy on the
+[RoboCasa365 leaderboard](https://github.com/robocasa-benchmark/leaderboard) protocol.
 
-- **System2** — a Qwen-VL planner served by **vLLM** (Docker). It decides *what* to do: it writes
-  a milestone plan, then after every segment watches a clip of what happened and issues the next
-  subgoal.
-- **System1** — a subgoal-conditioned **pi0.5** policy (JAX, openpi) served over a websocket. It
-  decides *how* to move: it gets the task, the current subgoal and the cameras, and returns action
-  chunks plus its own subgoal-progress estimate.
-- **Simulator** — **official RoboCasa 1.0.1** (git submodule). The episode loop drives both servers
-  and scores rollouts exactly like the official evaluation client.
-
-```
-                      HTTP (OpenAI API)                     websocket (openpi)
-   System2 (vLLM, GPU) <──────────────── sim/official_eval.py ─────────────────> System1 (JAX, GPU)
-   plan / next subgoal                    RoboCasa gym env                        action chunks
-                                          (MuJoCo, EGL render)
-```
-
-## Layout
+- **System2**, a Qwen3-VL-4B planner served by vLLM in Docker, decides *what* to do. It writes a
+  milestone plan, then after every System1 segment watches a clip of it and issues the next subgoal.
+- **System1**, a subgoal-conditioned pi0.5 policy (JAX, openpi) behind a websocket, decides *how* to
+  move: action chunks plus its own subgoal-progress estimate.
+- **Language steering**, a set of hardcoded revisions of System2's output, sits between the two.
+- **Simulator**: official RoboCasa 1.0.1 (git submodule). The loop scores rollouts exactly like the
+  official evaluation client.
 
 ```
-system1/                 System1 server: inference-only subset of openpi (uv project)
-  serve_system1.py       serve one checkpoint
-  src/openpi/            model + RoboCasa policy transforms (verbatim from openpi), slim config
-system2/
-  Dockerfile             System2 server image (vLLM 0.19.1)
-  language_steering/     System2 language steering (sys2_steering*.py): general + per-task revisions
-                         of System2's output, applied before System1 runs
-sim/
-  official_eval.py       leaderboard-protocol driver (gym.make / reset / horizon / success)
-  combined_eval.py       the S2<->S1 episode loop (verbatim, imports rewritten)
-  sys2_client.py         System2 prompts, clip building, response parsing
-  stop_criterion.py      System1 segment stop rule (progress + action quiescence)
-  s1_io.py, subtask_env.py   System1 request/response + observation/action helpers
-  summarize.py           per-split success rates in leaderboard format
-  vendor/sys2/           System2 clip frame-sampling policy (must match training)
-viewer/                  results website (server.py + index.html, standard library only)
-scripts/                 setup + serve + run wrappers
-third_party/robocasa     official RoboCasa @ 2ce1aec (v1.0.1)
-third_party/robosuite    robosuite @ 232ce7d4 (v1.5.2)
+ System2 (vLLM) <--HTTP-- sim/official_eval.py --websocket--> System1 (JAX)
+ plan, subgoals            RoboCasa gym env (MuJoCo, EGL)      action chunks
 ```
 
-## Requirements
+## Results
 
-- Linux, NVIDIA GPU(s) with the NVIDIA driver; tested on RTX A6000 48 GB.
-- Docker with the NVIDIA container toolkit (System2), [uv](https://docs.astral.sh/uv/) (System1 +
-  simulator), git.
-- Disk: ~25 GB RoboCasa kitchen assets, ~46 GB System2 image, checkpoints (System1 ~12 GB, System2
-  ~9 GB).
-- GPU memory per stack (measured): System2 at `--mem-frac 0.45` ≈ 21 GB; System1 at
-  `--mem-frac 0.35` + MuJoCo EGL rendering ≈ 19 GB. One stack fits on one 48 GB GPU with
-  `--s1-mem-frac 0.32 --s2-mem-frac 0.42`, or spread it over two GPUs.
+| Atomic, seen | Composite, seen | Composite, unseen | Overall |
+| --- | --- | --- | --- |
+| 80.1 | 51.5 | 28.1 | **54.3** |
+
+50 tasks x 50 trials, 2500 episodes. Per-task numbers and the exact setup: [doc/results.md](doc/results.md).
 
 ## Install
 
+Linux with NVIDIA GPUs (tested on A100-80GB and RTX A6000 48 GB), Docker with the NVIDIA container
+toolkit, git, and [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+About 60 GB of disk: 30 GB System2 image, 10 GB kitchen assets, 22 GB checkpoints.
+
 ```bash
 git clone --recursive <this repo> sys1_sys2 && cd sys1_sys2
-# (already cloned without --recursive: git submodule update --init)
-
-# uv, if missing
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 1. System1 env (pinned by system1/uv.lock; same package versions as the training repo)
-(cd system1 && uv sync --frozen)
-
-# 2. System2 image (vLLM 0.19.1 on the public ModelScope CUDA 12.9 base)
-docker build -t sys1-sys2/system2-vllm:0.19.1 system2
-
-# 3. Simulator env: official robocasa + robosuite from the submodules, macros, ~10 GB assets download
-bash scripts/setup_sim_env.sh
+bash scripts/setup.sh                 # System1 env, System2 image, simulator env + kitchen assets
+bash scripts/download_checkpoints.sh  # both checkpoints from the Hugging Face Hub, see Checkpoints
 ```
 
-The System1 tokenizer is downloaded once from `gs://big_vision/paligemma_tokenizer.model`
-(public) into `~/.cache/openpi` (override with `OPENPI_DATA_HOME`).
+`setup.sh` creates `system1/.venv` (pinned by `system1/uv.lock`), builds the Docker image
+`sys1-sys2/system2-vllm:0.19.1` and creates `sim/.venv` with RoboCasa and robosuite from the
+submodules.
 
 ## Checkpoints
 
-| | pass | must contain |
-| --- | --- | --- |
-| System1 | the **step dir**, e.g. `<run>/269999` | `params/`, `assets/robocasa_system1/norm_stats.json`, and `<run>/config.json` (selects the model/prompt variant, e.g. progress-as-action vs. progress head) |
-| System2 | the **checkpoint dir**, e.g. `<run>/checkpoint-17124` | a full (merged) HF checkpoint: `model*.safetensors`, `config.json`, tokenizer/processor files, `chat_template.jinja` |
+The evaluated checkpoints are public on the Hugging Face Hub; no token is needed.
+
+| | Hugging Face repo | Size | Local path (default for every script) |
+| --- | --- | --- | --- |
+| System1 | [`yinpei-tri-pi/robocasa-system1-pi05-progact`](https://huggingface.co/yinpei-tri-pi/robocasa-system1-pi05-progact) | 12 GB | `checkpoints/system1/f0717-...-progact__.../269999` |
+| System2 | [`yinpei-tri-pi/robocasa-system2-qwen3vl-4b`](https://huggingface.co/yinpei-tri-pi/robocasa-system2-qwen3vl-4b) | 10 GB | `checkpoints/system2/system2-full-0804-...-ep3/checkpoint-17124` |
+
+`bash scripts/download_checkpoints.sh` downloads both into those paths. The exact paths are in
+`scripts/checkpoints.env`. Other checkpoints work with `--s1-ckpt` and `--s2-ckpt`. System1 takes a
+step dir with `params/`, `assets/robocasa_system1/norm_stats.json` and `config.json`. System2 takes a
+merged Hugging Face checkpoint.
 
 ## Run
 
-One command starts both servers, waits until they are ready, evaluates, stops the servers and
-prints the summary:
-
 ```bash
-bash scripts/run_eval.sh \
-  --s1-ckpt /ckpts/sys1/<run>/269999 --s2-ckpt /ckpts/sys2/<run>/checkpoint-17124 \
-  --s1-gpu 0 --s2-gpu 1 \
-  --tasks atomic_seen --num-trials 50 --log-dir results/atomic_seen
+bash scripts/run_fleet.sh --num-trials 2   # 100-episode check, ~35 min on 8 GPUs
+bash scripts/run_fleet.sh                  # full benchmark: 50 tasks x 50 trials on every GPU
 ```
 
-- `--tasks` takes task names and/or groups: `atomic_seen` `composite_seen` `composite_unseen`, or
-  `all` (the 50 leaderboard tasks), comma-separated (e.g. `atomic_seen,CloseFridge`).
-- Quick pipeline check: `--tasks CloseFridge,OpenDrawer,TurnOnSinkFaucet --num-trials 2`.
-- A cold vLLM start (image import, torch.compile, CUDA graphs) can take several minutes; System1
-  loads in ~1 minute.
-- Docker setups that reject `--gpus` (CDI / snap Docker) need `--docker-gpu-mode runtime`.
-- Extra loop flags go after `--`, e.g. `-- --no-task-rules --no-general-rules` (see
-  `python sim/official_eval.py --help`).
+`run_fleet.sh` starts one complete stack per GPU: System1, System2 and a simulator client. The
+stacks take whole tasks from a shared queue, longest horizon first. Each task's trials run in order
+on one env, as the official client does. With 80 GB GPUs the default memory split (`--s1-mem-frac
+0.32 --s2-mem-frac 0.42`) fits a stack on one card. On smaller cards, give System2 its own GPUs with
+`--s2-gpus`.
 
-To run the pieces separately (e.g. servers on another host):
-
-```bash
-bash scripts/serve_system1.sh --ckpt <s1 step dir> --gpu 0 --port 8060
-bash scripts/serve_system2.sh --ckpt <s2 checkpoint dir> --gpu 1 --port 8100
-MUJOCO_GL=egl CUDA_VISIBLE_DEVICES=0 sim/.venv/bin/python sim/official_eval.py \
-  --tasks atomic_seen --num-trials 50 --log-dir results/atomic_seen \
-  --s1-port 8060 --s2-port 8100 --s1-dir <s1 step dir> --s2-dir <s2 checkpoint dir> \
-  --norm-stats <s1 step dir>/assets/robocasa_system1/norm_stats.json
-sim/.venv/bin/python sim/summarize.py --log-dir results/atomic_seen
-```
+- `--gpus 0,1,2,3` picks GPUs. `--tasks` takes task names and/or `atomic_seen`,
+  `composite_seen`, `composite_unseen`, `all`, comma-separated.
+- Results go to `results/<protocol>__<run name>/`, e.g.
+  `results/official__s1-progact270k_s2-qwen3vl-4b-full-ep3-17124/`. Set it with `--log-dir`.
+- Relaunching the same command resumes: a task with a `stats.json` is skipped. An interrupted task
+  restarts from trial 0.
+- Monitor with `sim/.venv/bin/python sim/progress.py --log-dir <results dir>`. The fleet writes
+  `timing.json` and `summary.txt` when it ends.
+- Loop flags go after `--`, e.g. `-- --no-task-lang-steer --no-general-lang-steer`. See
+  `sim/.venv/bin/python sim/official_eval.py --help`.
+- A cold vLLM start can take several minutes. Docker setups that reject `--gpus` need
+  `--docker-gpu-mode runtime`.
 
 ### Full 50-task evaluation on several GPUs
 
-Each task is one sequential unit: its trials share one env, as in the official client. To
-parallelize, run one stack per GPU pair (distinct `--s1-port`/`--s2-port`) on a disjoint subset of
-tasks, all writing to the same `--log-dir`; `summarize.py` then reads every task. A task with a
-finished `stats.json` is skipped, so an interrupted run can be relaunched with the same command.
-An interrupted task restarts from trial 0.
-
-## Outputs
-
-```
-<log-dir>/
-  evals/<split>/<task>/<timestamp>/stats.json      {"num_episodes", "success_rate"} (official format)
-  evals/<split>/<task>/<timestamp>/episodes.json   per-trial outcome, steps, turns
-  episodes/<method>/<task>__official_<split>_seed<seed>__episode_<k>/
-      episode.json        plan, every System2 turn (prompt, response, parsed tags), language-steering interventions
-      turn<NN>/           System1 rollout video, System2 input clip, System1 anchor frame, step log
-  episodes/<method>/rule_config.json   which language-steering tiers ran (a mismatched rerun into the same dir is refused)
-  summary.txt             output of sim/summarize.py
-  logs/                   system1.log, system2.log, eval.log
-```
-
-### Browse results
+The leaderboard run is 50 tasks x 50 trials (2500 episodes). On one machine with 8 GPUs, one stack per
+GPU, with every default spelled out:
 
 ```bash
-sim/.venv/bin/python viewer/server.py --log-dir results/atomic_seen --port 8090   # --host 0.0.0.0 for LAN
-# open http://127.0.0.1:8090/   (over SSH: ssh -L 8090:127.0.0.1:8090 <host>)
+tmux new -s fulleval        # or setsid nohup ... &: the run takes about half a day
+bash scripts/run_fleet.sh \
+  --s1-ckpt checkpoints/system1/f0717-270k-bs512-progact__progact_granfine_verbsimp_noexec/269999 \
+  --s2-ckpt checkpoints/system2/system2-full-0804-qwen3vl-4b-gb192-full-vitfull-lr1e5-vitlr2e6-alignerlr1e5-zero2-2n-ep3/checkpoint-17124 \
+  --gpus 0,1,2,3,4,5,6,7 --s1-mem-frac 0.32 --s2-mem-frac 0.42 \
+  --protocol official --tasks all --num-trials 50 --split pretrain --seed 7 \
+  --log-dir results/full_official
 ```
 
-Per-task success rates, and for each episode: the rollout played turn by turn with the System2
-subgoal of the running segment, a step timeline against the official horizon (▲ = language-steering
-intervention), System2's cold plan, and every turn's System2 input clip, thought, judgement,
-subgoal, plan update, language-steering interventions and raw response next to the System1 segment it produced.
-It reads the results live (Reload), so it can watch a run in progress.
+While it runs, and after it ends:
 
-`sim/summarize.py` averages tasks per split (latest `stats.json` per task, like
-robocasa-benchmark/openpi `get_eval_stats.py`). It prints the leaderboard fields
-(`atomic_seen_success`, `composite_seen_success`, `composite_unseen_success`) and the
-task-weighted overall (18/16/16).
+```bash
+sim/.venv/bin/python sim/progress.py --log-dir results/full_official    # episodes done, elapsed, ETA
+sim/.venv/bin/python sim/summarize.py --log-dir results/full_official   # per-task and per-split success
+cat results/full_official/timing.json                                   # start, end, wall time
+```
+
+On GPUs smaller than 80 GB, run System2 on its own cards: `--gpus 0,1,2,3 --s2-gpus 4,5,6,7` gives four
+stacks, System1 and the simulator on GPUs 0-3 and System2 on GPUs 4-7. On 8 x A100-80GB the
+100-episode pilot (`--num-trials 2`) took 35 minutes, which puts the full run at about 13 hours.
+
+One stack on two GPUs, or the servers on their own:
+
+```bash
+bash scripts/run_eval.sh --s1-gpu 0 --s2-gpu 1 --tasks CloseFridge,OpenDrawer --num-trials 2
+bash scripts/serve_system1.sh --gpu 0 --port 8060
+bash scripts/serve_system2.sh --gpu 1 --port 8100
+```
+
+**Target-split protocol.** `--protocol target` instead runs the 30 recorded RoboCasa target-split
+episodes per task (1500) that the training repo reported, restoring each episode's scene and initial
+state. It needs the target human datasets (`sim/.venv/bin/python -m robocasa.scripts.download_datasets
+--split target --source human`) and `--dataset-root <datasets>/v1.0/target`. It is not the leaderboard
+number.
+
+## Outputs and viewer
+
+```
+results/<protocol>__<run name>/
+  summary.txt, timing.json          leaderboard fields per split + overall; wall time
+  evals/pretrain/<task>/<time>/     stats.json {"num_episodes", "success_rate"} (official format), episodes.json
+  episodes/<run name>/<task>__official_pretrain_seed7__episode_<k>/
+      episode.json                  plan, every System2 turn (prompts, response, parsed tags), language steering
+      turn<NN>/                     System1 rollout video, System2 input clip, anchor frame, per-step log
+  episodes/<run name>/lang_steer_config.json   which language steering ran (a mismatched rerun is refused)
+  logs/stack<i>/                    system1.log, system2.log, eval.log
+```
+
+```bash
+sim/.venv/bin/python viewer/server.py --log-dir results/<dir> --port 8090   # http://127.0.0.1:8090/
+```
+
+The overview at `/` shows per-task success and plays each episode turn by turn. The rollout
+inspector at `/rollout` shows one System2 turn beside the System1 segment it produced. It covers the
+prompt System1 received, the video synced to a step slider, and progress, action and gripper curves.
+It also shows the predicted action chunks, why the segment ended, and the clip handed to the next
+turn. Both read results live.
 
 ## Evaluation protocol
 
 `sim/official_eval.py` reproduces the environment side of robocasa-benchmark/openpi
-`examples/robocasa/main.py` (commit 5a6beda):
+`examples/robocasa/main.py` (commit 5a6beda); only the policy differs.
 
 | | official client | here |
 | --- | --- | --- |
 | env | `gym.make(f"robocasa/{task}", split="pretrain", seed=7)`, one env per task | same |
-| global seed | `np.random.seed(7)` once per process | same |
-| trials | 50 sequential `env.reset()` calls on that env | same (`--num-trials 50`) |
-| instruction | `obs["annotation.human.task_description"]` (= `ep_meta["lang"]`) | same field |
-| step limit | `get_task_horizon(task)` env steps | same, counted cumulatively over all System1 segments |
-| success | `info["success"]` (= `env._check_success()`) after every step; stop at the first success | same check after every step; stop at the first success |
-| cameras | left/right agentview + eye-in-hand, 256×256 | same renders |
+| trials | 50 sequential `env.reset()` calls on that env | same |
+| instruction | `obs["annotation.human.task_description"]` | same field |
+| step limit | `get_task_horizon(task)` env steps | same, counted over all System1 segments |
+| success | `info["success"]` after every step; stop at the first success | same |
+| cameras | left/right agentview + eye-in-hand, 256x256 | same renders |
 
-The one difference is the policy: two servers in a loop instead of one websocket policy. Notes:
+- **Scenes.** Trial 0's scene is fixed by the seed. Later trials also depend on how many steps
+  earlier trials took, as in the official client. The global `np.random.seed(7)` is reset before
+  every task, so a task's result does not depend on which stack ran it.
+- **Task status.** System2's "Current task status" line comes from the same success check, so it
+  reads `ongoing` whenever System2 is asked.
+- **Early stop.** If System2 declares the task finished before the environment does, the
+  last-milestone retry restarts the final milestone; an episode that still ends on System2's call
+  (4 of 2500 in the reference run) is scored a failure.
 
-- **System2's "Current task status" line** comes from the same success check. The episode ends on
-  the first success, so when System2 is queried this line always reads `ongoing`.
-- **Early stop.** If System2 declares `task_finish` before the env reports success, the episode
-  ends and is scored a failure. The step budget is never extended.
-- **Language steering.** `system2/language_steering/sys2_steering*.py` revise System2's output
-  (general plus per-task revisions, keyed on the env name and the gripper width) and are on by
-  default. Every intervention is recorded in `episode.json`; `-- --no-task-rules --no-general-rules`
-  disables them (the flag names are unchanged).
-- **Scenes.** With the env seeded, trial 0's scene is fixed. Later trials' scenes also depend on
-  how many env steps earlier trials took (stepping consumes the env RNG), exactly as in the
-  official client, so keep each task's trials sequential in one env. `main.py` runs all tasks in
-  one process with one global seed; `--tasks all` in one process matches that, while parallel
-  per-task processes each start from `np.random.seed(7)`.
+## Language steering
+
+`system2/language_steering/` holds hardcoded revisions of System2's output: subgoal wording, step
+estimates, plan edits and recovery turns. Some are keyed on the task name, some on the gripper
+width. They run in tiers, all on by default, and every intervention is recorded in `episode.json`.
+
+| Tier | Steers |
+| --- | --- |
+| mandatory | `repeat_cap`: advance a subgoal issued 3 times (2 for a reach) |
+| general | `press_again`, `regrasp_recovery` (one injected re-grasp after a missed grasp), `sink_faucet_est` |
+| task | 24 steers for 11 tasks, a plan override for StackBowlsCabinet, a gripper pin for GetToastedBread (`--no-task-lang-steer` turns them off) |
+| last-milestone retry | `final_milestone_retry`: retry the last milestone instead of accepting a false finish |
+
+`sim/.venv/bin/python -m pytest tests -q` runs their unit tests.
+
+## Layout
+
+```
+system1/                 System1 server: inference-only subset of openpi (uv project), serve_system1.py
+system2/                 System2 Dockerfile (vLLM 0.19.1); language_steering/
+sim/                     official_eval.py (leaderboard driver), target_eval.py (target-split driver),
+                         combined_eval.py (the System2 <-> System1 episode loop), sys2_client.py,
+                         stop_criterion.py, summarize.py, progress.py, work_queue.py, vendor/ (frame sampling)
+viewer/                  results website (standard library only)
+scripts/                 setup.sh, download_checkpoints.sh, run_fleet.sh, run_eval.sh, serve_system{1,2}.sh
+doc/results.md           reference results
+tests/                   language steering, System2 response parser, work queue
+third_party/             official RoboCasa @ 2ce1aec (v1.0.1), robosuite @ 232ce7d4 (v1.5.2)
+```
 
 ## Provenance
 
-Copied (not modified unless stated) from these sources:
-
 | here | source |
 | --- | --- |
-| `system1/src/openpi/**` (except below), `system1/packages/openpi-client` | openpi fork `yinpei-tri/openpi` @ e5bad79a |
-| `system1/src/openpi/training/config.py`, `policies/policy_config.py`, `serve_system1.py` | slim rewrites of `training/config.py`, `policies/policy_config.py`, `scripts/serve_policy.py` (+ the tag resolver from `scripts/train.py`); same transforms and model config |
-| `sim/combined_eval.py`, `sim/sys2_client.py`, `system2/language_steering/sys2_steering*.py` (were `sys2_rules*.py`), `sim/stop_criterion.py` | openpi fork `examples/robocasa/` @ e5bad79a (only import lines and module names changed) |
-| `sim/s1_io.py` | the 8 symbols `combined_eval.py` uses from `examples/robocasa/subtask_eval.py` |
-| `sim/subtask_env.py` | robocasa fork `yinpei-tri/robocasa` @ 26a7ba99, `robocasa/scripts/eval/subtask_env.py` |
-| `sim/vendor/sys2/data/video_policy.py`, `scripts/serve_system2.sh` flags | `yinpei-tri/sys2_train_eval` @ 189c24b3 |
-| `sim/official_eval.py` env lifecycle | robocasa-benchmark/openpi `examples/robocasa/main.py` @ 5a6beda |
+| `system1/src/openpi/**`, `system1/packages/openpi-client` | openpi fork `yinpei-tri/openpi` @ e5bad79a; `training/config.py`, `policies/policy_config.py` and `serve_system1.py` are inference-only slims with the same transforms and model config |
+| `sim/combined_eval.py`, `sim/sys2_client.py`, `sim/stop_criterion.py`, `system2/language_steering/*` | the same fork's `examples/robocasa/` (renamed; logic unchanged) |
+| `sim/s1_io.py` | the 8 symbols the loop uses from `examples/robocasa/subtask_eval.py` |
+| `sim/subtask_env.py` | robocasa fork `yinpei-tri/robocasa` @ 26a7ba99 |
+| `sim/vendor/sys2/`, `scripts/serve_system2.sh` flags | `yinpei-tri/sys2_train_eval` @ 189c24b3 |
+| `viewer/rollout.html` | openpi fork `examples/robocasa/subtask_eval_gui.py`, `/combine` page |
 
-System1 parity check: the slim server and the original openpi server, given the same checkpoint
-and input, returned bit-identical actions/progress/prompt for a progress-as-action checkpoint.
-For a progress-head checkpoint the progress output was identical and actions agreed to within
-openpi's own run-to-run GPU nondeterminism (~2e-3).
+Parity checks on A100 (2026-10-25): the System1 server here and openpi's own server returned the same
+prompt and actions within 3e-3, inside the 1.6e-2 spread between two fresh openpi servers. Replaying
+24 recorded System2 requests from the training repo gave 19 byte-identical responses and mean text
+similarity 0.98, the same spread the server shows against itself.

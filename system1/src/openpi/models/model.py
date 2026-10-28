@@ -168,7 +168,7 @@ def preprocess_observation(
     rotate) is applied to exactly these image keys; all others get color-jitter
     only. This is the explicit-list routing used for RoboCasa's 2-scene/1-wrist
     layout. For System1 the anchor scene cams are included too (anchors get the
-    same aug as current views). If None, falls back to the legacy rule (geom aug
+    same aug as current views). If None, falls back to the legacy behavior (geom aug
     iff "wrist" not in key).
     """
 

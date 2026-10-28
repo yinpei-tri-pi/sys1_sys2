@@ -19,7 +19,7 @@ git submodule update --init third_party/robocasa third_party/robosuite
 # openpi-client pins numpy<2 but works unchanged on robocasa's numpy 2.2.5; install it without its
 # pins and add its runtime deps explicitly.
 "$UV" pip install --python "$PY" --no-deps -e system1/packages/openpi-client
-"$UV" pip install --python "$PY" dm-tree msgpack websockets
+"$UV" pip install --python "$PY" dm-tree msgpack websockets pytest
 
 RC_PKG=$ROOT/third_party/robocasa/robocasa
 # Both robocasa scripts prompt (y/n) when their target already exists, so only run them when needed.

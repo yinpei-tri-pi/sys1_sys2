@@ -2,36 +2,36 @@
 
 Currently EMPTY: everything tried so far has either graduated into sys2_steering.py or been rejected.
 One file per task -- sys2_steering_exp_<Task>.py is loaded too, so parallel work on different tasks
-never shares a file. See .claude/agents/rule-experiment.md for the per-task agent protocol.
+never shares a file. See .claude/agents/steer-experiment.md for the per-task agent protocol.
 
 WORKFLOW
-  1. add a section here for ONE task, with every rule gated on that task name;
+  1. add a section here for ONE task, with every steer gated on that task name;
   2. run it (RUN_LABEL=debug-<Task>-vN) and compare against the task's baseline and the verified
-     rules on the SAME episodes -- twice, since a single n=20 run cannot resolve a 1-2 episode effect;
-  3. if it helps, move the rules into sys2_steering.py under a "GRADUATED" banner WITH the measurement
+     steers on the SAME episodes -- twice, since a single n=20 run cannot resolve a 1-2 episode effect;
+  3. if it helps, move the steers into sys2_steering.py under a "GRADUATED" banner WITH the measurement
      table, and empty this file again;
   4. if it does not, delete the section -- nothing else in the pipeline changes.
 
-Do NOT overwrite an in-flight section: two of the CoffeeSetupMug rules were never in git and were
+Do NOT overwrite an in-flight section: two of the CoffeeSetupMug steers were never in git and were
 nearly lost that way.
 
 CONTRACT
-  * export ``EXP_RULES``: a tuple of ``fn(task, plan, subgoal, est, state) -> dict``, same protocol
-    as the verified rules -- return {} for "does not apply", else any of
+  * export ``EXP_STEERS``: a tuple of ``fn(task, plan, subgoal, est, state) -> dict``, same protocol
+    as the verified steers -- return {} for "does not apply", else any of
     ``plan`` / ``subgoal`` / ``subgoal_detail`` / ``est_proposal`` / ``skip_s1`` / ``tx_label``
-    plus ``interventions`` (each with rule, kind, detail, before, after).
-  * est is PROPOSED, never assigned: apply_rules resolves the largest proposal once, so an
+    plus ``interventions`` (each with steer, kind, detail, before, after).
+  * est is PROPOSED, never assigned: apply_lang_steer resolves the largest proposal once, so an
     experimental est cannot chain with a verified one.
-  * ``state`` is a per-EPISODE dict threaded across turns -- the place for a rule's bookkeeping.
+  * ``state`` is a per-EPISODE dict threaded across turns -- the place for a steer's bookkeeping.
     combined_eval also puts ``grip_width`` / ``grip_width_min`` there, the gripper aperture left by
-    the PREVIOUS segment, so a rule can react to a physical outcome and not only to System2's text.
-  * ``tx_label`` marks a turn a rule INJECTED rather than one System2 asked for -- "tx_sg_failed"
+    the PREVIOUS segment, so a steer can react to a physical outcome and not only to System2's text.
+  * ``tx_label`` marks a turn a steer INJECTED rather than one System2 asked for -- "tx_sg_failed"
     for a recovery after a detected failure, "tx_sg_incomplete" for a continuation.
-  * EVERY rule is gated on exactly ONE task, checked as the first statement -- verify with a
+  * EVERY steer is gated on exactly ONE task, checked as the first statement -- verify with a
     cross-contamination check before running.
-  * ``SYS2_RULES_NO_EXP=1`` ignores this file without deleting it.
+  * ``SYS2_LANG_STEER_NO_EXP=1`` ignores this file without deleting it.
 
-WHAT THE GRADUATED RULES ESTABLISHED, worth reading before designing the next experiment:
+WHAT THE GRADUATED STEERS ESTABLISHED, worth reading before designing the next experiment:
 
   * est_length is the most reliable lever. It is a POLICY CONDITIONING tag (rendered into System1's
     prompt as "Estimated Length"), not just a budget, so raising it makes System1 move slower and
@@ -52,14 +52,14 @@ WHAT THE GRADUATED RULES ESTABLISHED, worth reading before designing the next ex
     7/20, 9/20 -- pooled 38/80 = 47.5%, observed range 7-13. At p=.475 the binomial SD is 2.23
     episodes, so +-2SD is +-4.5: that spread is PLAIN SAMPLING NOISE and needs no mechanism. Power at
     n=20 reaches only about +20pp (+4/20); detecting a true +10pp needs ~390 episodes PER ARM. So the
-    famous "13/20" was never a rules achievement and does not reproduce, and any per-task n=20 delta
+    famous "13/20" was never a steers achievement and does not reproduce, and any per-task n=20 delta
     of 1-3 episodes is unmeasured either way. Establish the band first (count each reference run's
     actual interventions; if none acts, the two runs are replicates and their spread is free
     variance), then judge against it, and prefer paired McNemar on the discordant pairs to comparing
     two rates. Code identity for those four runs was verified, not assumed: same S1/S2 checkpoint and
     step, same max_steps_cap=800 / max_turns=14 / horizon_mult=2.0, repeat_cap AST-identical between
-    the estbump commit (8ce348d, when the official set was 9 rules) and now, apply_rules differing
-    only by additive tx_label plumbing no scrub rule returns, and the cap_declined rate inside FAILING
+    the estbump commit (8ce348d, when the official set was 9 steers) and now, apply_lang_steer differing
+    only by additive tx_label plumbing no scrub steer returns, and the cap_declined rate inside FAILING
     episodes identical at 0.42/0.42/0.43 per turn -- the raw decline counts differ 41 vs 81 only
     because a run with more failures has more failing turns. Pooling just the three cap=800 runs gives
     29/60 = 48.3%, the same answer.
@@ -80,7 +80,7 @@ WHAT THE GRADUATED RULES ESTABLISHED, worth reading before designing the next ex
     Every success retracts ONCE; every failure loops 6-10 times to max_turns. There is no middle. So
     the task turns on whether the first retract latches env_success, and nothing after it ever
     rescues the episode. 73-75 retract segments per 20 episodes, mean 25 steps, and NOT ONE of them
-    ends on budget (57 stop_rule, 5 lookahead, 13 env_success) with the arm parked at width 0.0799 --
+    ends on budget (57 stop_criterion, 5 lookahead, 13 env_success) with the arm parked at width 0.0799 --
     the third instance of the quiescence defect after the GetToastedBread wait and the WeighIngredients
     cabinet door. force_steps is the untried lever and its ceiling is +8/20, well clear of the band.
   * REJECTED on that task, all inside the band: grasp est>=75 (10/20, 5/20), one borrowed
@@ -89,10 +89,10 @@ WHAT THE GRADUATED RULES ESTABLISHED, worth reading before designing the next ex
     WORKED and still did not matter: it fired on 3 episodes whose width read 0.0010 after the carry
     and recovered the sponge outright (0.0010 -> 0.0648 and -> 0.0581 on two of them, the third by the
     following turn), those episodes then scrubbed and released normally -- and all three still died in
-    the retract loop. A rule can be mechanically perfect and irrelevant if it is not aimed at the sink.
+    the retract loop. A steer can be mechanically perfect and irrelevant if it is not aimed at the sink.
   * A WIDTH SIGNATURE IS A PROPERTY OF THE ROLLOUT, NOT OF THE EPISODE. The sponge-drop analysis
     predicted the re-grasp would fire on eps 0/15/18 (the episodes that dropped it in the recorded
-    run); live it fired on 1/14/17. Only the RATE transfers, never the identities -- so "this rule will
+    run); live it fired on 1/14/17. Only the RATE transfers, never the identities -- so "this steer will
     fire on these five episodes" is not a testable prediction, and the fired-on set being all
     previously-successful episodes is an artefact of comparing different rollouts, not evidence of harm.
     INDEPENDENTLY REPRODUCED on PreSoakPan: replay predicted eps 2/6/8/11/12, live fired on
@@ -114,4 +114,4 @@ WHAT THE GRADUATED RULES ESTABLISHED, worth reading before designing the next ex
 
 from __future__ import annotations
 
-EXP_RULES: tuple = ()
+EXP_STEERS: tuple = ()

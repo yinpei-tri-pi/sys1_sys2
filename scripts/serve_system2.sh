@@ -14,7 +14,7 @@
 #   * --media-io-kwargs / --limit-mm-per-prompt / --allowed-local-media-path must be present or
 #     video requests fail or silently re-sample.
 #   * FPS / FPS_MAX_FRAMES / FRAME_FACTOR / *_MAX_TOKEN_NUM pin qwen-vl-utils' globals.
-#   * The client still sends per-request frame counts (sim/loop/sys2_client.py).
+#   * The client still sends per-request frame counts (sim/sys2_client.py).
 set -euo pipefail
 
 CKPT="" GPU=0 PORT=8100 MEM_FRAC=0.45
@@ -35,7 +35,10 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[[ -n "$CKPT" ]] || { echo "FATAL: --ckpt is required" >&2; exit 2; }
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT/scripts/checkpoints.env"
+CKPT=${CKPT:-$ROOT/$S2_CKPT_DEFAULT}   # default: the downloaded checkpoint
+[[ -d "$CKPT" ]] || { echo "FATAL: no checkpoint at $CKPT (pass --ckpt or run scripts/download_checkpoints.sh)" >&2; exit 2; }
 CKPT=$(cd "$CKPT" && pwd)
 if [[ -s "$CKPT/adapter_model.safetensors" && ! -s "$CKPT/model.safetensors" \
       && ! -s "$CKPT/model.safetensors.index.json" ]]; then
