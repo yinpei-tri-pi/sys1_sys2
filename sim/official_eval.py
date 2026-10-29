@@ -57,6 +57,9 @@ import combined_eval as CE  # noqa: E402
 import work_queue as WQ  # noqa: E402
 import sys2_client as S2C  # noqa: E402
 
+# Episode errors that are the policy's own failure, scored as a failed trial instead of aborting the task.
+POLICY_OUTPUT_ERRORS = ("System2 returned no <plan>",)
+
 GYM_CAMERA_SIZE = 256  # RoboCasaGymEnv's camera config (PandaOmronKeyConverter.get_camera_config)
 
 
@@ -143,8 +146,8 @@ def build_argparser():
     off.add_argument("--tasks", nargs="+", default=["atomic_seen"],
                      help="task names and/or TARGET_TASKS groups (atomic_seen composite_seen "
                           "composite_unseen, or all); run sequentially in ONE process like main.py")
-    off.add_argument("--split", choices=["pretrain", "target"], default="pretrain",
-                     help="scene split (the leaderboard evaluates in pretrain scenes)")
+    off.add_argument("--split", choices=["pretrain", "target"], default="target",
+                     help="scene split: target = the 10 held-out RoboCasa365 kitchens and target objects, as the benchmark evaluates (third_party/robocasa/docs/benchmarking/foundation_model_learning.md); pretrain = the 2500 training kitchens")
     off.add_argument("--seed", type=int, default=7)
     off.add_argument("--num-trials", type=int, default=50, help="rollouts per task (leaderboard: 50)")
     off.add_argument("--log-dir", type=Path, required=True,
@@ -243,6 +246,16 @@ def _run_task(task, task_dir, args, out_root, s1, s2, norm_stats) -> float:
             args.episode_index = trial
             doc = CE.eval_episode(Path(f"official/{task}"), s1, s2, args, out_root, args.method,
                                   norm_stats)
+            if doc.get("error") and any(m in doc["error"] for m in POLICY_OUTPUT_ERRORS):
+                # The POLICY failed, not the infrastructure: System2 produced no usable plan (seen
+                # once: greedy decoding degenerated into a repeated word until the token limit).
+                # Score the trial as a failure, as the official client would score a policy that
+                # never acts, and go on to the next trial.
+                print(f"  {task} trial {trial}: scored as failure ({doc['error']})", flush=True)
+                doc["policy_error"] = doc.pop("error")
+                doc.update(termination="no_plan", episode_success=False,
+                           n_env_steps=doc.get("n_env_steps") or 0, n_turns=doc.get("n_turns") or 0,
+                           max_official_steps=horizon)
             if doc.get("error"):
                 # An infrastructure failure (server down, crash) is not a policy failure; abort
                 # the task rather than score it, so a rerun starts the task from trial 0.

@@ -91,7 +91,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--log-dir", type=Path, required=True)
     ap.add_argument("--protocol", choices=["official", "target"], default="official")
-    ap.add_argument("--split", default="pretrain", help="official protocol only")
+    ap.add_argument("--split", default="target", help="official protocol only")
     args = ap.parse_args()
     (official if args.protocol == "official" else target)(args)
 

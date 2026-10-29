@@ -16,6 +16,8 @@
 #            join the same --log-dir later (other --gpus, distinct --s1-base-port/--s2-base-port and
 #            --stack-prefix). shard: official only, stack i runs tasks i, i+N, ... (fixed split)
 #
+# --stacks-per-gpu K  K stacks per listed GPU (2 on 80 GB cards: --s1-mem-frac 0.13 --s2-mem-frac 0.20);
+#            a GPU's later stacks start once its first stack's servers are up
 # --gpus     one stack per listed GPU; System1, System2 and the simulator share it (80 GB cards:
 #            default --s1-mem-frac 0.32 --s2-mem-frac 0.42). For smaller cards put System2 on its
 #            own GPUs with --s2-gpus (same length as --gpus, matched element-wise).
@@ -26,7 +28,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 S1_CKPT="" S2_CKPT="" GPUS="" S2_GPUS="" TASKS=all NUM_TRIALS=50 LOG_DIR=""
-S1_MEM=0.32 S2_MEM=0.42 S1_BASE=8060 S2_BASE=8100 PROTOCOL=official SCHEDULE=queue PREFIX=stack PASS=() EXTRA=()
+S1_MEM=0.32 S2_MEM=0.42 S1_BASE=8060 S2_BASE=8100 PROTOCOL=official SCHEDULE=queue PREFIX=stack PER_GPU=1 PASS=() EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --s1-ckpt) S1_CKPT=$2; shift 2 ;;
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --s2-base-port) S2_BASE=$2; shift 2 ;;
     --protocol) PROTOCOL=$2; PASS+=("$1" "$2"); shift 2 ;;
     --stack-prefix) PREFIX=$2; shift 2 ;;
+    --stacks-per-gpu) PER_GPU=$2; shift 2 ;;
     --schedule) SCHEDULE=$2; shift 2 ;;
     --split|--seed|--docker-gpu-mode|--dataset-root) PASS+=("$1" "$2"); shift 2 ;;
     --) shift; EXTRA=("$@"); break ;;
@@ -56,7 +59,7 @@ S1_CKPT=${S1_CKPT:-$ROOT/$S1_CKPT_DEFAULT}; S2_CKPT=${S2_CKPT:-$ROOT/$S2_CKPT_DE
   || { echo "FATAL: checkpoints not found ($S1_CKPT, $S2_CKPT); run scripts/download_checkpoints.sh" >&2; exit 2; }
 S1_CKPT=$(cd "$S1_CKPT" && pwd); S2_CKPT=$(cd "$S2_CKPT" && pwd)
 if [[ -z "$LOG_DIR" ]]; then
-  _split=pretrain _seed=7
+  _split=target _seed=7
   for ((k = 0; k < ${#PASS[@]}; k++)); do
     [[ "${PASS[$k]}" == --split ]] && _split=${PASS[$((k + 1))]}
     [[ "${PASS[$k]}" == --seed ]] && _seed=${PASS[$((k + 1))]}
@@ -66,6 +69,12 @@ if [[ -z "$LOG_DIR" ]]; then
 fi
 IFS=',' read -ra G1 <<< "$GPUS"
 IFS=',' read -ra G2 <<< "${S2_GPUS:-$GPUS}"
+# --stacks-per-gpu K: K stacks on every listed GPU. The simulator is CPU-bound and the GPUs sit
+# mostly idle, so two stacks per 80 GB card (with smaller memory fractions) nearly double throughput.
+if (( PER_GPU > 1 )); then
+  B1=("${G1[@]}"); B2=("${G2[@]}")
+  for ((r = 1; r < PER_GPU; r++)); do G1+=("${B1[@]}"); G2+=("${B2[@]}"); done
+fi
 [[ ${#G1[@]} -eq ${#G2[@]} ]] || { echo "FATAL: --gpus and --s2-gpus must have the same length" >&2; exit 2; }
 N=${#G1[@]}
 mkdir -p "$LOG_DIR"; LOG_DIR=$(cd "$LOG_DIR" && pwd)
@@ -78,7 +87,25 @@ trap cleanup INT TERM
 T0=$(date +%s); START_ISO=$(date -Is)
 echo "[fleet] start $START_ISO on $(hostname)"
 echo "[fleet] $N stacks, protocol=$PROTOCOL schedule=$SCHEDULE tasks=[$TASKS] trials=$NUM_TRIALS -> $LOG_DIR"
+# A stack that shares a GPU with an earlier one starts only once that stack's servers answer: vLLM
+# sizes its KV cache from the memory free while it profiles, so two concurrent starts on one card can
+# miscount each other's allocation.
+wait_ready() {   # wait_ready <stack index>
+  local j=$1 s1 s2
+  for _ in $(seq 1 240); do
+    s1=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$((S1_BASE + j))/healthz" || true)
+    s2=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$((S2_BASE + j))/v1/models" || true)
+    [[ "$s1" == 200 && "$s2" == 200 ]] && return 0
+    kill -0 "${pids[$j]}" 2>/dev/null || return 0   # that stack died; do not block the rest
+    sleep 10
+  done
+}
 for i in $(seq 0 $((N - 1))); do
+  for ((j = 0; j < i; j++)); do
+    if [[ "${G1[$j]}" == "${G1[$i]}" || "${G2[$j]}" == "${G2[$i]}" || "${G1[$j]}" == "${G2[$i]}" || "${G2[$j]}" == "${G1[$i]}" ]]; then
+      echo "[fleet] $PREFIX$i shares a GPU with $PREFIX$j; waiting for its servers"; wait_ready "$j"
+    fi
+  done
   mkdir -p "$LOG_DIR/logs/$PREFIX$i"
   SHARD=()
   if [[ "$PROTOCOL" == official ]]; then

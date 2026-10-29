@@ -25,7 +25,7 @@ def main() -> None:
     ap.add_argument("--s1-dir", required=True)
     ap.add_argument("--s2-dir", required=True)
     ap.add_argument("--num-trials", type=int, default=50)
-    ap.add_argument("--split", default="pretrain")
+    ap.add_argument("--split", default="target")
     ap.add_argument("--seed", type=int, default=7)
     a = ap.parse_args()
     # robocasa prints warnings to STDOUT on import; keep stdout for the name alone.
@@ -36,7 +36,7 @@ def main() -> None:
         label = "target30"
     else:
         label = "official" if a.num_trials == 50 else f"official-{a.num_trials}trials"
-        if a.split != "pretrain":
+        if a.split != "target":
             label += f"-{a.split}"
         if a.seed != 7:
             label += f"-seed{a.seed}"

@@ -2032,7 +2032,8 @@ def build_argparser(description: str | None = None) -> argparse.ArgumentParser:
     ap.add_argument("--s2-host", default="127.0.0.1")
     ap.add_argument("--s2-port", type=int, default=8100)
     ap.add_argument("--s2-model", default="system2-full")
-    ap.add_argument("--s2-max-tokens", type=int, default=512)
+    ap.add_argument("--s2-max-tokens", type=int, default=1024,
+                    help="cap on one System2 reply (normal plans use ~250 tokens; 512 truncated a plan that degenerated into a repeated word)")
     ap.add_argument("--s2-file-uri", action="store_true",
                     help="pass media as file:// URIs instead of inlined base64 (server must share the FS)")
     # loop control
