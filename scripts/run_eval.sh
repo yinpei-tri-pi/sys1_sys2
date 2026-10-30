@@ -4,7 +4,7 @@
 #   bash scripts/run_eval.sh --s1-ckpt <s1 step dir> --s2-ckpt <s2 checkpoint dir> \
 #       --s1-gpu 0 --s2-gpu 1 --tasks atomic_seen --num-trials 50 --log-dir results/<run>
 #
-# --protocol    official (default): leaderboard protocol, sim/official_eval.py (pretrain scenes, seed,
+# --protocol    official (default): leaderboard protocol, sim/official_eval.py (target scenes, seed,
 #               --num-trials fresh resets per task) | target: the 30 recorded target-split episodes
 #               per task, sim/target_eval.py (shared work queue; --dataset-root = LeRobot target root)
 # --s1-ckpt / --s2-ckpt  default: the downloaded checkpoints (scripts/checkpoints.env)
@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 S1_CKPT="" S2_CKPT="" S1_GPU=0 S2_GPU=1 SIM_GPU="" S1_PORT=8060 S2_PORT=8100
-S1_MEM=0.35 S2_MEM=0.45 TASKS="atomic_seen" NUM_TRIALS=50 SPLIT=pretrain SEED=7 LOG_DIR=""
+S1_MEM=0.35 S2_MEM=0.45 TASKS="atomic_seen" NUM_TRIALS=50 SPLIT=target SEED=7 LOG_DIR=""
 SKIP_SERVERS=0 GPU_MODE=${DOCKER_GPU_MODE:-gpus} NAME="" PROTOCOL=official
 DATASET_ROOT=${ROBOCASA_LEROBOT_ROOT:-$HOME/robocasa_dataset}/v1.0/target EXTRA=()
 while [[ $# -gt 0 ]]; do
@@ -78,6 +78,16 @@ if [[ "$SKIP_SERVERS" != 1 ]]; then
   bash "$ROOT/scripts/serve_system1.sh" --ckpt "$S1_CKPT" --gpu "$S1_GPU" --port "$S1_PORT" \
     --mem-frac "$S1_MEM" > "$LOGS/system1.log" 2>&1 &
   pids+=("$!")
+  # System1 first, System2 once it answers: JAX preallocates its whole --mem-frac share while loading,
+  # and vLLM sizes its KV cache from the memory free during its own profiling. If System1 allocates
+  # inside that window (same GPU), vLLM counts it as its own overhead and fails with "No available
+  # memory for the cache blocks".
+  echo "[run_eval] starting System1 :$S1_PORT; System2 follows once it is up (logs in $LOGS)"
+  for _ in $(seq 1 60); do
+    [[ $(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$S1_PORT/healthz" || true) == 200 ]] && break
+    kill -0 "${pids[0]}" 2>/dev/null || { echo "FATAL: System1 exited; see $LOGS/system1.log" >&2; exit 1; }
+    sleep 10
+  done
   bash "$ROOT/scripts/serve_system2.sh" --ckpt "$S2_CKPT" --gpu "$S2_GPU" --port "$S2_PORT" \
     --mem-frac "$S2_MEM" --docker-gpu-mode "$GPU_MODE" > "$LOGS/system2.log" 2>&1 &
   pids+=("$!")

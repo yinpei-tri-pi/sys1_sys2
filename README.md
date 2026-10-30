@@ -18,11 +18,16 @@ Evaluation-only package for a hierarchical policy on the
 
 ## Results
 
-| Atomic, seen | Composite, seen | Composite, unseen | Overall |
-| --- | --- | --- | --- |
-| 80.1 | 51.5 | 28.1 | **54.3** |
+RoboCasa365 leaderboard protocol in the held-out **target** scenes (the 10 target kitchens and the
+target objects, as RoboCasa's benchmark documentation specifies), 50 tasks x 50 trials, 2500 episodes:
 
-50 tasks x 50 trials, 2500 episodes. Per-task numbers and the exact setup: [doc/results.md](doc/results.md).
+| | Atomic, seen | Composite, seen | Composite, unseen | Overall |
+| --- | --- | --- | --- | --- |
+| Success (%) | 78.8 | 49.4 | 22.6 | **51.4** |
+| Successful episodes | 709 / 900 | 395 / 800 | 181 / 800 | **1285 / 2500** |
+
+Neither model was trained on target-split data. Per-task numbers, the exact setup and a pretrain-scene
+reference run (54.3 overall in the training kitchens): [doc/results.md](doc/results.md).
 
 ## Install
 
@@ -91,7 +96,7 @@ bash scripts/run_fleet.sh \
   --s1-ckpt checkpoints/system1/f0717-270k-bs512-progact__progact_granfine_verbsimp_noexec/269999 \
   --s2-ckpt checkpoints/system2/system2-full-0804-qwen3vl-4b-gb192-full-vitfull-lr1e5-vitlr2e6-alignerlr1e5-zero2-2n-ep3/checkpoint-17124 \
   --gpus 0,1,2,3,4,5,6,7 --s1-mem-frac 0.32 --s2-mem-frac 0.42 \
-  --protocol official --tasks all --num-trials 50 --split pretrain --seed 7 \
+  --protocol official --tasks all --num-trials 50 --split target --seed 7 \
   --log-dir results/full_official
 ```
 
@@ -101,6 +106,15 @@ While it runs, and after it ends:
 sim/.venv/bin/python sim/progress.py --log-dir results/full_official    # episodes done, elapsed, ETA
 sim/.venv/bin/python sim/summarize.py --log-dir results/full_official   # per-task and per-split success
 cat results/full_official/timing.json                                   # start, end, wall time
+```
+
+The simulator is CPU-bound and the GPUs mostly idle, so two stacks per 80 GB card roughly halve the
+wall time (16 stacks: about 7 hours instead of 14; the slowest single task, about 6.6 hours, is the
+floor). A GPU's second stack starts once its first stack's servers are up:
+
+```bash
+bash scripts/run_fleet.sh --gpus 0,1,2,3,4,5,6,7 --stacks-per-gpu 2 --s1-mem-frac 0.13 --s2-mem-frac 0.20 \
+  --protocol official --tasks all --num-trials 50 --split target --seed 7 --log-dir results/full_official
 ```
 
 On GPUs smaller than 80 GB, run System2 on its own cards: `--gpus 0,1,2,3 --s2-gpus 4,5,6,7` gives four
@@ -127,8 +141,8 @@ System1 and System2 use only the pretrain split, with dense subgoals labelled by
 ```
 results/<protocol>__<run name>/
   summary.txt, timing.json          leaderboard fields per split + overall; wall time
-  evals/pretrain/<task>/<time>/     stats.json {"num_episodes", "success_rate"} (official format), episodes.json
-  episodes/<run name>/<task>__official_pretrain_seed7__episode_<k>/
+  evals/target/<task>/<time>/       stats.json {"num_episodes", "success_rate"} (official format), episodes.json
+  episodes/<run name>/<task>__official_target_seed7__episode_<k>/
       episode.json                  plan, every System2 turn (prompts, response, parsed tags), language steering
       turn<NN>/                     System1 rollout video, System2 input clip, anchor frame, per-step log
   episodes/<run name>/lang_steer_config.json   which language steering ran (a mismatched rerun is refused)
@@ -152,7 +166,7 @@ turn. Both read results live.
 
 | | official client | here |
 | --- | --- | --- |
-| env | `gym.make(f"robocasa/{task}", split="pretrain", seed=7)`, one env per task | same |
+| env | `gym.make(f"robocasa/{task}", split=<split>, seed=7)`, one env per task; `main.py` defaults to `pretrain`, the benchmark docs evaluate `target` | same, `--split target` by default |
 | trials | 50 sequential `env.reset()` calls on that env | same |
 | instruction | `obs["annotation.human.task_description"]` | same field |
 | step limit | `get_task_horizon(task)` env steps | same, counted over all System1 segments |
@@ -166,7 +180,7 @@ turn. Both read results live.
   reads `ongoing` whenever System2 is asked.
 - **Early stop.** If System2 declares the task finished before the environment does, the
   last-milestone retry restarts the final milestone; an episode that still ends on System2's call
-  (4 of 2500 in the reference run) is scored a failure.
+  (4 of 2500 in the pretrain-scene run) is scored a failure.
 
 ## Language steering
 
