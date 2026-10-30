@@ -5,12 +5,12 @@ evaluated with this repo's `scripts/run_fleet.sh` in RoboCasa365's held-out **ta
 target kitchens and the target object set, as RoboCasa's benchmark documentation specifies. Neither
 model saw target-split data in training; both were trained on the pretrain split only.
 
-| Split | Tasks | Success (%) |
-| --- | --- | --- |
-| Atomic, seen | 18 | 78.8 |
-| Composite, seen | 16 | 49.4 |
-| Composite, unseen | 16 | 22.6 |
-| **Overall** (task-weighted 18/16/16) | 50 | **51.4** |
+| Split | Tasks | Successful episodes | Success (%) |
+| --- | --- | --- | --- |
+| Atomic, seen | 18 | 709 / 900 | 78.8 |
+| Composite, seen | 16 | 395 / 800 | 49.4 |
+| Composite, unseen | 16 | 181 / 800 | 22.6 |
+| **Overall** (task-weighted 18/16/16) | 50 | **1285 / 2500** | **51.4** |
 
 ## Setup
 

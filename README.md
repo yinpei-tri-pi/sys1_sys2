@@ -21,9 +21,10 @@ Evaluation-only package for a hierarchical policy on the
 RoboCasa365 leaderboard protocol in the held-out **target** scenes (the 10 target kitchens and the
 target objects, as RoboCasa's benchmark documentation specifies), 50 tasks x 50 trials, 2500 episodes:
 
-| Atomic, seen | Composite, seen | Composite, unseen | Overall |
-| --- | --- | --- | --- |
-| 78.8 | 49.4 | 22.6 | **51.4** |
+| | Atomic, seen | Composite, seen | Composite, unseen | Overall |
+| --- | --- | --- | --- | --- |
+| Success (%) | 78.8 | 49.4 | 22.6 | **51.4** |
+| Successful episodes | 709 / 900 | 395 / 800 | 181 / 800 | **1285 / 2500** |
 
 Neither model was trained on target-split data. Per-task numbers, the exact setup and a pretrain-scene
 reference run (54.3 overall in the training kitchens): [doc/results.md](doc/results.md).
